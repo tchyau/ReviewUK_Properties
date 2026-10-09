@@ -1204,7 +1204,9 @@ function parseHtml(html,url){
       if(typeof pd.bedrooms==="number") out.beds=pd.bedrooms; if(typeof pd.bathrooms==="number") out.baths=pd.bathrooms;
       if(pd.propertySubType) out.type=pd.propertySubType;
       if(pd.tenure&&pd.tenure.tenureType) out.tenure=cap(pd.tenure.tenureType);
-      const sq=(pd.sizings||[]).find(z=>z&&z.unit==="sqft"); if(sq&&sq.maximumSize) out.sqft=Math.round(sq.maximumSize);
+      const sq=(pd.sizings||[]).find(z=>z&&z.unit==="sqft"), sm=(pd.sizings||[]).find(z=>z&&z.unit==="sqm");
+      if(sq&&sq.maximumSize) out.sqft=Math.round(sq.maximumSize); if(sm&&sm.maximumSize) out.sqm=Math.round(sm.maximumSize*10)/10; if(out.sqft==null&&out.sqm!=null) out.sqft=Math.round(out.sqm*10.7639);
+      const pp=/([\d,]+(?:\.\d+)?)/.exec(String(P.pricePerSqFt||"")); if(pp) out.ppsf=Math.round(Number(pp[1].replace(/,/g,"")));
       const ct=pd.livingCosts&&pd.livingCosts.councilTaxBand; if(/^[A-H]$/.test(ct||"")) out.ctax=ct;
       const tags=(pd.tags||[]).join(" "); if(/NEW_HOME/i.test(tags)) out.newBuild=true; if(/SOLD_STC|UNDER_OFFER/i.test(tags)) out.status="sstc";
       if(pd.status&&(pd.status.published===false||pd.status.archived===true)) out.status="removed";
@@ -1636,6 +1638,7 @@ function parseZProperty(html){ // the page data of zoopla.co.uk/property/uprn/�
     const z={uprn:String(A.uprn),url:zpropUrl(A.uprn),address:A.fullAddress||"",pc:normPc(A.postcode)||"",listings:[],sales:[],live:null};
     if(typeof A.latitude==="number"&&typeof A.longitude==="number"){ z.lat=A.latitude; z.lng=A.longitude; }
     if(attr[1]) z.type=attr[1]; if(beds) z.beds=Number(beds);
+    const fa=/"floorAreaSqM":(\d+(?:\.\d+)?)/.exec(attr[0]||""); if(fa) z.sqm=Number(fa[1]);
     (H.historicListings||[]).forEach(e=>{ if(!e||!parseD(e.date)) return; const id=(/\/(\d+)\/?$/.exec(e.uri||"")||[])[1]||"";
       const o={date:e.date,id}; if(typeof e.price==="number") o.price=e.price; if(e.attributes&&typeof e.attributes.bedrooms==="number") o.beds=e.attributes.bedrooms;
       if(/^\/property-history\//.test(e.uri||"")) o.url="https://www.zoopla.co.uk"+e.uri; z.listings.push(o); });
@@ -1664,7 +1667,7 @@ function parseZPostcode(html){ // every address Zoopla holds in one postcode, wi
   while((i=t.indexOf('"node":{"__typename":"Property"',i+1))>=0){
     try{ const n=JSON.parse(sliceJson(t,i+7)), a=n.address||{}, at=n.attributes||{}; if(!a.uprn||seen[a.uprn]) continue; seen[a.uprn]=1;
       const c={uprn:String(a.uprn),address:a.fullAddress||""}; if(typeof a.latitude==="number"&&typeof a.longitude==="number"){ c.lat=a.latitude; c.lng=a.longitude; }
-      if(typeof at.bedrooms==="number") c.beds=at.bedrooms; if(at.propertyType) c.type=at.propertyType; out.push(c); }catch(e){} }
+      if(typeof at.bedrooms==="number") c.beds=at.bedrooms; if(typeof at.floorAreaSqM==="number") c.sqm=at.floorAreaSqM; if(at.propertyType) c.type=at.propertyType; out.push(c); }catch(e){} }
   return {items:out,more:/"hasNextPage":true/.test(t)};
 }
 function parseZPostcodeMd(md){ const out=[], re=/## \[([^\]]+)\]\(https:\/\/www\.zoopla\.co\.uk\/property\/uprn\/(\d+)\/\)([\s\S]*?)(?=\n\*\s+\n?## \[|$)/g; let m;
@@ -1756,6 +1759,51 @@ async function historyFinder(boxId,p){
   if(box) box.querySelectorAll("button[data-i]").forEach(b=>b.addEventListener("click",()=>historyRead(boxId,p,f.items[Number(b.dataset.i)],"your choice from the addresses in "+f.pc)));
 }
 
+/* ---------- size and price per area ---------- */
+const SQFT=10.7639;
+const NDSS={house:{1:58,2:70,3:84,4:97},flat:{1:50,2:61,3:74,4:90}};   // nationally described space standard, smallest occupancy per bedroom count (sq m)
+function sizeOf(p){
+  const ls=p.listings||[], l=ls.find(x=>x.portal==="rightmove"&&typeof x.price==="number")||ls.find(x=>typeof x.price==="number");
+  const price=l?l.price:null, z=p.zhist||null;
+  let sqft=p.sqft!=null?Number(p.sqft):null, sqm=p.sqm!=null?Number(p.sqm):null;
+  if(sqft==null&&sqm!=null) sqft=Math.round(sqm*SQFT);
+  if(sqm==null&&sqft!=null) sqm=Math.round(sqft/SQFT*10)/10;
+  const o={price,sqft,sqm,notes:[]};
+  if(price&&sqft){ o.psf=Math.round(price/sqft); o.psm=Math.round(price/sqm); }
+  const pl=p.plan&&p.plan.v>0?p.plan:null;
+  if(pl){ o.planSqft=pl.u==="sqm"?Math.round(pl.v*SQFT):Math.round(pl.v); o.planSqm=pl.u==="sqm"?pl.v:Math.round(pl.v/SQFT*10)/10; if(price) o.planPsf=Math.round(price/o.planSqft); }
+  if(z&&z.sqm>0){ o.zsqm=z.sqm; if(price) o.zpsm=Math.round(price/z.sqm); }
+  const gap=(a,b)=>Math.abs(a-b)/Math.max(a,b);
+  if(p.sqft!=null&&p.sqm!=null&&gap(p.sqft/SQFT,p.sqm)>0.03) o.notes.push("The advert gives "+nf.format(p.sqft)+" sq ft and "+p.sqm+" sq m, which do not agree with each other.");
+  if(sqft&&o.planSqft&&gap(sqft,o.planSqft)>0.05) o.notes.push("The floor plan total ("+nf.format(o.planSqft)+" sq ft) differs from the advertised size ("+nf.format(sqft)+" sq ft) by "+Math.round(gap(sqft,o.planSqft)*100)+"%. Ask the agent which one is right.");
+  if(sqm&&o.zsqm&&gap(sqm,o.zsqm)>0.10) o.notes.push("Zoopla's record for the address shows "+o.zsqm+" sq m against "+sqm+" sq m advertised ("+Math.round(gap(sqm,o.zsqm)*100)+"% apart). The record may be older than any extension or conversion.");
+  if(typeof p.ppsf==="number"&&o.psf&&gap(p.ppsf,o.psf)>0.03) o.notes.push("Rightmove shows £"+nf.format(p.ppsf)+" per sq ft; this page works out £"+nf.format(o.psf)+" from the price on file.");
+  const b=Number(p.beds), flat=/flat|apartment|maisonette|studio/i.test(p.type||""), min=(NDSS[flat?"flat":"house"]||{})[b];
+  if(min&&sqm){ o.min=min; o.minFlat=flat; if(sqm<min*0.97) o.notes.push("At "+sqm+" sq m this is "+Math.round((1-sqm/min)*100)+"% under the "+min+" sq m the national space standard sets for a "+b+"-bed "+(flat?"flat":"two-storey house")+" (smallest occupancy). That standard binds new homes where a council has adopted it, so it is a yardstick here, not a fault.");
+    else if(sqm>=min) o.notes.push("At "+sqm+" sq m it meets the "+min+" sq m national space standard for a "+b+"-bed "+(flat?"flat":"two-storey house")+" (yardstick only)."); }
+  return o;
+}
+function sizeShort(p){ const s=sizeOf(p); return s.sqft?nf.format(s.sqft)+" sq ft"+(s.psf?" · £"+nf.format(s.psf)+"/sq ft":""):""; }
+function sizeBlock(p,canEdit){
+  const s=sizeOf(p), rm=(p.listings||[]).find(l=>l.portal==="rightmove"), ru=rm&&safeUrl("rightmove",rm.url);
+  let h='<div class="section"><span class="label">Size and price per area</span>';
+  if(s.sqft&&s.price){
+    h+='<dl class="kv"><dt>Asking price</dt><dd class="num">'+esc(money(s.price))+'</dd><dt>Advertised size</dt><dd class="num">'+nf.format(s.sqft)+' sq ft · '+s.sqm+' sq m</dd>'+
+      '<dt>Price per sq ft</dt><dd class="num"><b>£'+nf.format(s.psf)+'</b></dd><dt>Price per sq m</dt><dd class="num"><b>£'+nf.format(s.psm)+'</b></dd>';
+    if(s.planSqft) h+='<dt>Floor plan total</dt><dd class="num">'+nf.format(s.planSqft)+' sq ft · '+s.planSqm+' sq m (£'+nf.format(s.planPsf)+'/sq ft)</dd>';
+    if(s.zsqm) h+='<dt>Zoopla address record</dt><dd class="num">'+s.zsqm+' sq m (£'+nf.format(s.zpsm)+'/sq m)</dd>';
+    h+='</dl>';
+  } else if(s.price) h+='<p class="small">No size was found in the advert. Many agents leave it out; read it off the floor plan and enter it below.</p>'+(s.zsqm?'<p class="small">Zoopla\'s record for the address shows '+s.zsqm+' sq m, about £'+nf.format(s.zpsm)+' per sq m at the asking price.</p>':'');
+  else h+='<p class="small muted">Add a listing with a price to work out the price per area.</p>';
+  if(s.notes.length) h+='<ul class="checks">'+s.notes.map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul>';
+  if(canEdit){
+    h+='<div class="field"><label class="label" for="pl_v">Total area printed on the floor plan</label><div class="pcrow"><input id="pl_v" type="number" min="1" step="any" inputmode="decimal" placeholder="e.g. 655" value="'+(p.plan&&p.plan.v?esc(String(p.plan.v)):"")+'">'+
+      '<select id="pl_u" aria-label="Unit"><option value="sqft"'+(p.plan&&p.plan.u==="sqm"?"":" selected")+'>sq ft</option><option value="sqm"'+(p.plan&&p.plan.u==="sqm"?" selected":"")+'>sq m</option></select><button type="button" class="btn quiet" id="plSave">Save</button>'+(p.plan?'<button type="button" class="btn quiet" id="plDel">Clear</button>':'')+'</div></div>'+
+      (ru?'<a class="golink ghost" href="'+esc(ru+"#/floorplan?activePlan=1&channel=RES_BUY")+'" target="_blank" rel="noopener noreferrer">Open the floor plan on Rightmove ↗</a>':'');
+  }
+  h+='<p class="small muted">Sizes come from the advert and Zoopla\'s record. Floor plans are pictures, so this page cannot read the figures printed on them; type the total in. Plan areas are approximate and agents may measure differently (internal area against gross), so ask for a measured survey before relying on a price per area. It is a comparison aid, not a valuation.</p></div>';
+  return h;
+}
 /* ---------- files: export, import, a copy to share, the Excel template, batch import ---------- */
 function download(name,data,type){ const u=URL.createObjectURL(new Blob([data],{type})); const el=document.createElement("a"); el.href=u; el.download=name; document.body.appendChild(el); el.click(); el.remove(); setTimeout(()=>URL.revokeObjectURL(u),5000); }
 const embedJson=o=>JSON.stringify(o).replace(/</g,"\\u003c").replace(/\u2028|\u2029/g,"");
@@ -1862,7 +1910,7 @@ async function importOne(it){
     await st.store.update(ex.id,Object.assign({listings,checkedOn:isoToday()},fix)); return {ok:true,label:fix.name||ex.name,why:"updated"}; }
   const sp=splitAddr(first.address||""), pcv=fix.postcode||first.pc||(P.zoopla&&P.zoopla.pc)||"";
   const doc=Object.assign({name:sp.name||"Property",locality:sp.locality,postcode:pcv,listings:Object.keys(P).map(k=>toListing(P[k])),checkedOn:isoToday(),addedAt:Date.now()},fix);
-  ["type","beds","baths","sqft","tenure","newBuild"].forEach(f=>{ const v=(P.rightmove&&P.rightmove[f]!=null)?P.rightmove[f]:(P.zoopla?P.zoopla[f]:null); if(v!=null) doc[f]=v; });
+  ["type","beds","baths","sqft","sqm","ppsf","tenure","newBuild"].forEach(f=>{ const v=(P.rightmove&&P.rightmove[f]!=null)?P.rightmove[f]:(P.zoopla?P.zoopla[f]:null); if(v!=null) doc[f]=v; });
   let q=null; if(normPc(pcv)){ try{ q=await lookupPostcode(pcv); }catch(e){} }
   const src=["rightmove","zoopla"].map(k=>P[k]).find(x=>x&&typeof x.lat==="number");
   if(src){ doc.lat=src.lat; doc.lng=src.lng; doc.pinNote="from the "+PORTALS[src.portal].name+" listing"+(src.pin==="accurate"?", marked accurate":""); }
@@ -1933,7 +1981,7 @@ function detail(p){
   const c=lsoaOf(p), ls=p.listings||[], canEdit=st.canWrite!==false&&!!st.store;
   let h='<div class="panel-head"><button type="button" class="btn quiet" id="backBtn">← All properties</button><span class="small muted">'+(p.checkedOn?"Checked "+esc(fmtD(p.checkedOn)):"")+'</span></div>';
   if(st.flash&&st.flash.id===p.id) h+='<p class="flash" role="status">'+esc(st.flash.text)+'</p>';
-  h+='<div><h2>'+esc(p.name||"Property")+'</h2><p class="muted">'+esc([p.locality,p.postcode].filter(Boolean).join(" · "))+'</p><p class="small">'+esc([p.beds?p.beds+" bed":"",p.type,p.sqft?nf.format(p.sqft)+" sq ft":"",p.tenure,p.newBuild?"New build":""].filter(Boolean).join(" · "))+'</p></div>';
+  h+='<div><h2>'+esc(p.name||"Property")+'</h2><p class="muted">'+esc([p.locality,p.postcode].filter(Boolean).join(" · "))+'</p><p class="small">'+esc([p.beds?p.beds+" bed":"",p.type,sizeShort(p),p.tenure,p.newBuild?"New build":""].filter(Boolean).join(" · "))+'</p></div>';
   if(canEdit) h+='<div class="actions"><button type="button" class="btn quiet" id="moveBtn" aria-pressed="'+(st.moving===p.id)+'">'+(st.moving===p.id?"Stop moving the pin":"Move the pin")+'</button><span class="small muted">'+(st.moving===p.id?"Drag this property's price tag to its new position.":esc("Pin "+(p.pinNote||"at the postcode centre")))+'</span></div>';
   h+='<div class="portals">';
   ["rightmove","zoopla"].forEach(k=>{
@@ -1959,6 +2007,7 @@ function detail(p){
   if(cmp.length) h+='<div class="section"><span class="label">Where the portals differ</span><ul class="diffs">'+cmp.map(f=>'<li class="'+(f.same?"same":"")+'">'+esc(f.text)+'</li>').join("")+'</ul></div>';
   h+='<div class="section"><span class="label">Listing history</span><div class="tl" id="tl"></div>'+historyTable(p)+'</div>';
   h+=zhistBlock(p,canEdit);
+  h+=sizeBlock(p,canEdit);
   if(c) h+=ratingBlock(c,p);
   if(Array.isArray(p.checks)&&p.checks.length) h+='<div class="section"><span class="label">Points to check</span><ul class="checks">'+p.checks.map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul></div>';
   if(p.note) h+='<p class="small muted">'+esc(p.note)+'</p>';
@@ -2097,7 +2146,7 @@ function wireAdd(){
       if(dr.qualifier) l.qualifier=dr.qualifier; if(dr.ctax) l.ctax=dr.ctax; if(dr.uprn) l.uprn=dr.uprn; if(dr.pc) l.pc=dr.pc;
       if(Array.isArray(dr.events)) l.events=clone(dr.events);
       if(v(d)&&!l.events.some(e=>e.date===v(d)&&e.type===$(kind).value)){ const ev={date:v(d),type:$(kind).value}; if(price!=null) ev.price=price; l.events.push(ev); }
-      ["baths","sqft","tenure","newBuild"].forEach(f=>{ if(dr[f]!=null&&extra[f]==null) extra[f]=dr[f]; });
+      ["baths","sqft","sqm","ppsf","tenure","newBuild"].forEach(f=>{ if(dr[f]!=null&&extra[f]==null) extra[f]=dr[f]; });
       listings.push(l);
     }
     if(!listings.length) return msg("Add at least one listing link.");
@@ -2138,7 +2187,7 @@ function wireDetail(p){
   const save=async(patch,flash,msg)=>{ st.flash={id:p.id,text:flash}; try{ await st.store.update(p.id,Object.assign({checkedOn:isoToday()},patch)); }catch(err){ st.flash=null; msg(writeErr(err)); } };
   (p.listings||[]).forEach((l,i)=>wireReader("re_"+i,l.portal,()=>l.url,(parsed,msg)=>{
     const m=mergeListing(l,parsed), listings=clone(p.listings); listings[i]=m.listing;
-    const extra={}; ["baths","sqft","tenure"].forEach(f=>{ if(parsed[f]!=null&&p[f]==null) extra[f]=parsed[f]; });
+    const extra={}; ["baths","sqft","sqm","ppsf","tenure"].forEach(f=>{ if(parsed[f]!=null&&p[f]==null) extra[f]=parsed[f]; });
     if(parsed.pc&&!normPc(p.postcode)) extra.postcode=parsed.pc;
     save(Object.assign({listings},extra), PORTALS[l.portal].name+" re-read today: "+(m.changes.length?listOf(m.changes)+".":"no change in price or dates."), msg);
   },true));
@@ -2153,6 +2202,9 @@ function wireDetail(p){
   if($("zhRe")) $("zhRe").addEventListener("click",()=>historyRead("zh_box",p,{uprn:p.zhist.uprn,address:p.zhist.address,dist:p.zhist.dist},p.zhist.how));
   if($("zhDel")) $("zhDel").addEventListener("click",()=>{ st.flash={id:p.id,text:"Address history removed."}; st.store.update(p.id,{zhist:null}); });
   if($("zhLive")) $("zhLive").addEventListener("click",()=>{ $("al_zoopla").value=p.zhist.live.url; $("rd_al_zoopla").querySelector(".rd-go").click(); });
+  if($("plSave")) $("plSave").addEventListener("click",()=>{ const v=Number($("pl_v").value); if(!(v>0)) return;
+    st.flash={id:p.id,text:"Floor plan total saved."}; st.store.update(p.id,{plan:{v,u:$("pl_u").value}}); });
+  if($("plDel")) $("plDel").addEventListener("click",()=>{ st.flash={id:p.id,text:"Floor plan total cleared."}; st.store.update(p.id,{plan:null}); });
   const f=$("evF"); if(!f) return;
   f.addEventListener("submit",async e=>{
     e.preventDefault(); const msg=t=>{ $("evMsg").textContent=t; };
@@ -2223,7 +2275,7 @@ $("scaleNat").setAttribute("aria-pressed",String(st.scale==="nat")); $("scaleLoc
 $("mapNote").textContent = STANDALONE
   ? "The street map comes from Esri's public tile service and address search from OpenStreetMap; both need an internet connection. Boundaries for areas other than St Albans are downloaded from the ONS the first time you add them."
   : "A page inside Claude cannot load street map tiles, so only the boundaries and place names are shown here. The standalone file has the street map.";
-window.__slc={parseListing,parseHtml,mergeListing,rating,splitAddr,parseSearch,readXlsx,readDelimited,matchOf,parseZProperty,parseZPropertyMd,parseZPostcode,parseZPostcodeMd,histFacts};
+window.__slc={sizeOf,parseListing,parseHtml,mergeListing,rating,splitAddr,parseSearch,readXlsx,readDelimited,matchOf,parseZProperty,parseZPropertyMd,parseZPostcode,parseZPostcodeMd,histFacts};
 st.areas=wantAreas.filter(x=>LADS[x].geo); setPool();
 initMap(); drawLsoa(true); drawAll();
 (async function restoreAreas(){ // areas chosen last time whose boundaries are not built in
