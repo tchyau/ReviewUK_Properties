@@ -851,6 +851,9 @@ fieldset.pf.rightmove legend{color:var(--rm)} fieldset.pf.zoopla legend{color:va
 .cands{display:flex;flex-direction:column;gap:6px}
 .cand{display:flex;gap:10px;align-items:center;justify-content:space-between;border:1px solid var(--line);border-radius:4px;padding:6px 8px;overflow-wrap:anywhere}
 .cand .btn{flex:none}
+ul.apps{list-style:none;margin:6px 0;padding:0}
+li.app{padding:7px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}
+details>summary{cursor:pointer;margin:6px 0}
 .pcrow #zh_url{flex:1;width:auto;min-width:0}
 .dot.arch{background:transparent;border:2px solid var(--zp);width:10px;height:10px;box-sizing:border-box}
 .dot.lr{background:var(--muted)}
@@ -1804,6 +1807,91 @@ function sizeBlock(p,canEdit){
   h+='<p class="small muted">Sizes come from the advert and Zoopla\'s record. Floor plans are pictures, so this page cannot read the figures printed on them; type the total in. Plan areas are approximate and agents may measure differently (internal area against gross), so ask for a measured survey before relying on a price per area. It is a comparison aid, not a valuation.</p></div>';
   return h;
 }
+/* ---------- planning applications and planning constraints ---------- */
+const PLANIT="https://www.planit.org.uk/api/applics/json?", PDATA="https://www.planning.data.gov.uk/entity.json?";
+const LIVE_STATES=/^(undecided|appealed|referred)$/i;
+let planLayer=null;
+const httpsUrl=u=>{ try{ const x=new URL(u); return x.protocol==="https:"?x.href:""; }catch(e){ return ""; } };
+async function jsonGet(url){ // straight from the page; the reader service as the fallback
+  try{ const r=await fetch(url); if(r.ok) return await r.json(); if(r.status===429) throw {user:"PlanIt asked for a pause (too many requests). Try again in a minute."}; }catch(e){ if(e&&e.user) throw e; }
+  const t=await jina(url,null,false), i=t.indexOf("{"), j=t.lastIndexOf("}"); if(i<0||j<i) throw {user:"The planning service could not be reached."}; return JSON.parse(t.slice(i,j+1));
+}
+const wktBox=(lng,lat,m)=>{ const dy=m/111320, dx=m/(111320*Math.cos(lat*Math.PI/180)), a=[lng-dx,lat-dy],b=[lng+dx,lat-dy],c=[lng+dx,lat+dy],d=[lng-dx,lat+dy]; return "POLYGON(("+[a,b,c,d,a].map(q=>q[0].toFixed(6)+" "+q[1].toFixed(6)).join(",")+"))"; };
+const hav=(a,b,c,d)=>{ const R=6371000, r=Math.PI/180, x=(c-a)*r*Math.cos((b+d)/2*r), y=(d-b)*r; return Math.round(R*Math.sqrt(x*x+y*y)); };
+const tcase=s=>String(s||"").replace(/\s+/g," ").trim().replace(/\b([A-Za-z])([A-Za-z']*)/g,(m,a,b)=>a.toUpperCase()+b.toLowerCase()).replace(/\b(Al\d|[A-Z]{1,2}\d[A-Z\d]?)\b/g,m=>m.toUpperCase());
+const slimApp=r=>({u:r.uid||r.name,a:tcase(r.address),d:String(r.description||"").replace(/\s+/g," ").trim().slice(0,200),s:r.app_state||"",t:r.app_type||"",z:r.app_size||"",sd:r.start_date||"",dd:r.decided_date||"",m:Math.round((r.distance||0)*1000),x:r.location_x,y:r.location_y,l:httpsUrl(r.url)||httpsUrl(r.link),pl:httpsUrl(r.link)});
+function addrMatcher(p){ // the house number and street of the property, to pick its own applications out of the list
+  const nm=String(p.name||"").trim(), m=/^(\d+[A-Za-z]?)\s*(?:,|\s)\s*([A-Za-z][A-Za-z' -]+?)(?:,|$)/.exec(nm); if(!m) return null;
+  const num=m[1].toLowerCase(), street=m[2].trim().toLowerCase().split(/\s+/).slice(0,2).join(" ");
+  return a=>{ const s=String(a||"").toLowerCase().replace(/^(flat|apartment)\s+\w+,?\s*/,""); return s.indexOf(num+" "+street)===0||s.indexOf(num+", "+street)===0; };
+}
+async function planningRead(p){
+  const lat=p.lat, lng=p.lng; if(typeof lat!=="number"||typeof lng!=="number") throw {user:"This property has no map pin yet."};
+  const sel="&select=uid,name,address,description,app_state,app_type,app_size,start_date,decided_date,distance,location_x,location_y,url,link,postcode";
+  const [near,close]=await Promise.all([jsonGet(PLANIT+"lat="+lat+"&lng="+lng+"&krad=0.5&pg_sz=300&sort=-start_date"+sel), jsonGet(PLANIT+"lat="+lat+"&lng="+lng+"&krad=0.03&pg_sz=100&sort=-start_date"+sel)]);
+  const all=(near.records||[]).map(slimApp), seen={}; all.forEach(a=>seen[a.u]=1);
+  (close.records||[]).map(slimApp).forEach(a=>{ if(!seen[a.u]){ all.push(a); seen[a.u]=1; } });
+  const match=addrMatcher(p), here=match?all.filter(a=>match(a.a)).sort((a,b)=>a.sd<b.sd?1:-1):[];
+  const hereIds={}; here.forEach(a=>hereIds[a.u]=1);
+  const nearby=all.filter(a=>a.m<=250&&!hereIds[a.u]).slice(0,40);
+  const large=all.filter(a=>/large/i.test(a.z)&&LIVE_STATES.test(a.s)&&!hereIds[a.u]).slice(0,6);
+  const errors=[], pd=async(ds,m)=>{ try{ const j=await jsonGet(PDATA+"geometry="+encodeURIComponent(wktBox(lng,lat,m))+"&geometry_relation=intersects&dataset="+ds+"&limit=20"); return j.entities||[]; }catch(e){ errors.push(ds); return []; } };
+  const [ca,a4,fl,gb,tpo,lb]=await Promise.all([pd("conservation-area",20),pd("article-4-direction-area",20),pd("flood-risk-zone",20),pd("green-belt",20),pd("tree-preservation-zone",60),pd("listed-building",120)]);
+  const pt=e=>{ const m=/POINT \(([-\d.]+) ([-\d.]+)\)/.exec(e.point||""); return m?{x:Number(m[1]),y:Number(m[2])}:null; };
+  const listed=lb.map(e=>{ const q=pt(e); return {n:tcase(e.name),g:e["listed-building-grade"]||"",r:e.reference,m:q?hav(lng,lat,q.x,q.y):null}; }).sort((a,b)=>(a.m==null?1e9:a.m)-(b.m==null?1e9:b.m)).slice(0,4);
+  return {at:isoToday(),lat,lng,total:near.total,nearby,here,large,errors,
+    cons:{ca:ca.map(e=>e.name),a4:a4.map(e=>e.name),fl:fl.map(e=>e["flood-risk-level"]||e.name||"zone"),gb:gb.map(e=>e.name),tpo:tpo.length,listed}};
+}
+function planFlags(p,pl){ const f=[], c=pl.cons||{}, live=(pl.nearby||[]).filter(a=>LIVE_STATES.test(a.s));
+  if((c.ca||[]).length) f.push("Conservation area: "+c.ca.join(", ")+". Extra controls apply to trees, demolition and external changes.");
+  if((c.a4||[]).length) f.push("Article 4 direction: "+c.a4.join(", ")+". Some permitted development rights are removed, so an extension or loft may need full permission.");
+  const l0=(c.listed||[]).find(x=>x.m!=null&&x.m<=20); if(l0) f.push("A listed building ("+(l0.g?"grade "+l0.g+", ":"")+l0.n+") is "+l0.m+" m from the pin. Check whether this home is the listed one.");
+  if((c.fl||[]).length) f.push("Inside a flood-risk zone on Planning Data (level "+c.fl.join(", ")+"). Check the Environment Agency map and ask about insurance.");
+  if((c.gb||[]).length) f.push("Green belt land ("+c.gb.join(", ")+"): extensions and new building are tightly limited.");
+  if(c.tpo) f.push(c.tpo+" tree preservation zone"+(c.tpo>1?"s":"")+" within 60 m. Check for protected trees on or beside the plot.");
+  (pl.here||[]).filter(a=>/^(rejected|appealed|withdrawn)$/i.test(a.s)).slice(0,3).forEach(a=>f.push("At this address: "+a.s.toLowerCase()+" application "+a.u+" ("+(fmtD(a.sd))+"): "+a.d.slice(0,100)));
+  (pl.large||[]).slice(0,3).forEach(a=>f.push("Large application "+a.m+" m away, still live: "+a.d.slice(0,110)+" ("+a.u+")."));
+  const ext=live.filter(a=>/extension|loft|dormer|garage conversion|rear|two storey|demolition/i.test(a.d)); if(ext.length>=3) f.push(ext.length+" live extension or conversion applications within 250 m: expect building works nearby.");
+  return f; }
+function planLevel(pl){ const n=(pl.nearby||[]).filter(a=>LIVE_STATES.test(a.s)).length; return n>=15?["Busy",n]:n>=5?["Moderate",n]:["Quiet",n]; }
+function appRow(a){ const u=a.l||a.pl; return '<li class="app"><span class="small"><b>'+esc(a.u)+'</b> · '+esc(a.s||"Status not shown")+(a.t?' · '+esc(a.t):'')+(a.z?' · '+esc(a.z):'')+' · '+a.m+' m · '+esc(fmtD(a.sd))+(a.dd?' → decided '+esc(fmtD(a.dd)):'')+'<br>'+esc(a.a)+'<br><span class="muted">'+esc(a.d||"No description")+'</span>'+(u?' <a href="'+esc(u)+'" target="_blank" rel="noopener noreferrer">Council record ↗</a>':'')+'</span></li>'; }
+function planningBlock(p,canEdit){
+  const pl=p.planning; let h='<div class="section"><span class="label">Planning and constraints</span>';
+  if(!pl){
+    h+='<p class="small muted">Looks up planning applications within 250 m, the history at this address, and conservation-area, listed-building, Article 4, flood and green-belt constraints.</p>';
+    if(canEdit&&STANDALONE) h+='<div class="actions"><button type="button" class="btn quiet" id="plBtn">Check planning near this pin</button></div><div id="pl_box"></div>';
+    else h+='<p class="small muted">This needs the standalone file.</p>';
+    return h+'</div>'; }
+  const f=planFlags(p,pl), lv=planLevel(pl), here=pl.here||[], live=(pl.nearby||[]).filter(a=>LIVE_STATES.test(a.s)), dec=(pl.nearby||[]).filter(a=>!LIVE_STATES.test(a.s));
+  h+='<p class="small"><b>Planning activity: '+lv[0]+'</b>: '+lv[1]+' live application'+(lv[1]===1?'':'s')+' within 250 m'+(pl.total!=null?' ('+nf.format(pl.total)+' recorded within 500 m by PlanIt)':'')+'.</p>';
+  if(f.length) h+='<ul class="checks">'+f.map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul>'; else h+='<p class="small">No constraint or warning was found at the pin.</p>';
+  const nm=addrMatcher(p);
+  h+='<span class="label">At this address</span>'+(here.length?'<ul class="apps">'+here.map(appRow).join("")+'</ul>':'<p class="small muted">'+(nm?'No application on PlanIt matches '+esc(p.name)+'.':'Put the house number in the property name to match applications to this address.')+' The council\'s own record is the one to rely on.</p>');
+  if(live.length) h+='<details><summary class="small">Live nearby ('+live.length+')</summary><ul class="apps">'+live.slice(0,15).map(appRow).join("")+'</ul></details>';
+  if(dec.length) h+='<details><summary class="small">Decided nearby ('+dec.length+')</summary><ul class="apps">'+dec.slice(0,15).map(appRow).join("")+'</ul></details>';
+  const lis=(pl.cons&&pl.cons.listed)||[]; if(lis.length) h+='<p class="small muted">Nearest listed buildings: '+lis.map(x=>esc(x.n)+(x.g?' (grade '+esc(x.g)+')':'')+(x.m!=null?', '+x.m+' m':'')).join('; ')+'.</p>';
+  const any=(pl.here||[])[0]||(pl.nearby||[])[0], cu=any&&httpsUrl(any.l)?new URL(any.l).origin:"";
+  h+='<div class="actions">'+(canEdit&&STANDALONE?'<button type="button" class="btn quiet" id="plBtn">Check again</button><button type="button" class="btn quiet" id="plDel">Remove</button>':'')+'</div><div id="pl_box"></div>'+
+    (cu?'<a class="golink ghost" href="'+esc(cu)+'" target="_blank" rel="noopener noreferrer">Open the council\'s planning portal ↗</a>':'')+
+    '<a class="golink ghost" href="https://www.gov.uk/find-local-council" target="_blank" rel="noopener noreferrer">Find the council\'s building control team ↗</a>'+
+    '<p class="small muted">Read '+esc(fmtD(pl.at))+(pl.errors&&pl.errors.length?'; could not read: '+esc(pl.errors.join(", ")):'')+'. Applications come from PlanIt, which collects council records, and constraints from the government\'s Planning Data; neither is complete or always current. Building regulations records are mostly not public, so ask the seller\'s solicitor for building regulations and completion certificates, and use a local authority search before buying. This is not legal advice.</p></div>';
+  return h;
+}
+function drawPlanMarkers(p){
+  if(!map||!window.L) return; if(planLayer){ planLayer.clearLayers(); } else planLayer=L.layerGroup().addTo(map);
+  const pl=p&&p.planning; if(!pl) return;
+  (pl.here||[]).concat(pl.nearby||[]).forEach(a=>{ if(typeof a.x!=="number"||typeof a.y!=="number") return; const live=LIVE_STATES.test(a.s);
+    const m=L.circleMarker([a.y,a.x],{radius:live?6:4,weight:1.5,color:live?"#b45309":"#475569",fillColor:live?"#f59e0b":"#94a3b8",fillOpacity:.75});
+    const d=document.createElement("div"); d.style.maxWidth="240px"; d.innerHTML='<b>'+esc(a.u)+'</b><br>'+esc(a.s)+(a.t?' · '+esc(a.t):'')+'<br>'+esc(a.d.slice(0,140))+((a.l||a.pl)?'<br><a href="'+esc(a.l||a.pl)+'" target="_blank" rel="noopener noreferrer">Council record ↗</a>':'');
+    m.bindPopup(d); m.addTo(planLayer); });
+}
+function wirePlanning(p){
+  if($("plBtn")) $("plBtn").addEventListener("click",async()=>{ const box=$("pl_box"), b=$("plBtn"); b.disabled=true;
+    box.innerHTML='<p class="small muted">Reading planning applications and constraints…</p>';
+    try{ const pl=await planningRead(p); st.flash={id:p.id,text:"Planning checked: "+planLevel(pl)[1]+" live application"+(planLevel(pl)[1]===1?"":"s")+" within 250 m."}; await st.store.update(p.id,{planning:pl}); }
+    catch(e){ b.disabled=false; box.innerHTML='<p class="small muted">'+esc((e&&e.user)||"That did not work. Try again in a minute.")+'</p>'; } });
+  if($("plDel")) $("plDel").addEventListener("click",()=>{ st.flash={id:p.id,text:"Planning check removed."}; st.store.update(p.id,{planning:null}); });
+}
 /* ---------- files: export, import, a copy to share, the Excel template, batch import ---------- */
 function download(name,data,type){ const u=URL.createObjectURL(new Blob([data],{type})); const el=document.createElement("a"); el.href=u; el.download=name; document.body.appendChild(el); el.click(); el.remove(); setTimeout(()=>URL.revokeObjectURL(u),5000); }
 const embedJson=o=>JSON.stringify(o).replace(/</g,"\\u003c").replace(/\u2028|\u2029/g,"");
@@ -1959,7 +2047,8 @@ function drawPanel(){
   const el=$("panel");
   if(st.mode==="add"){ el.innerHTML=addForm(); wireAdd(); return; }
   const p=st.props.find(x=>x.id===st.sel);
-  if(p){ el.innerHTML=detail(p); wireDetail(p); drawTimeline(p); return; }
+  if(p){ el.innerHTML=detail(p); wireDetail(p); wirePlanning(p); drawTimeline(p); drawPlanMarkers(p); return; }
+  drawPlanMarkers(null);
   let h=pcBlock()+'<div class="panel-head"><h2>Properties</h2><span class="small muted">'+(st.dbState==="ready"?st.props.length+" on file":"")+'</span></div>';
   if(st.dbState==="loading") h+='<p class="empty">Loading the listing file. Each property will appear here and as a price tag on the map.</p>';
   else if(st.dbState==="absent") h+='<p class="empty">The listing file is kept by Claude alongside this page, so it only loads when the page is opened in Claude. A downloaded copy of the page cannot reach it; use the standalone file for that. The deprivation map works either way.</p>';
@@ -2008,6 +2097,7 @@ function detail(p){
   h+='<div class="section"><span class="label">Listing history</span><div class="tl" id="tl"></div>'+historyTable(p)+'</div>';
   h+=zhistBlock(p,canEdit);
   h+=sizeBlock(p,canEdit);
+  h+=planningBlock(p,canEdit);
   if(c) h+=ratingBlock(c,p);
   if(Array.isArray(p.checks)&&p.checks.length) h+='<div class="section"><span class="label">Points to check</span><ul class="checks">'+p.checks.map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul></div>';
   if(p.note) h+='<p class="small muted">'+esc(p.note)+'</p>';
