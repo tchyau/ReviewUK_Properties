@@ -854,6 +854,25 @@ fieldset.pf.rightmove legend{color:var(--rm)} fieldset.pf.zoopla legend{color:va
 ul.apps{list-style:none;margin:6px 0;padding:0}
 li.app{padding:7px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}
 details>summary{cursor:pointer;margin:6px 0}
+.rptwin{position:fixed;inset:0;z-index:5000;display:flex;flex-direction:column;background:Canvas;color:CanvasText}
+.rpt-top{display:flex;flex-wrap:wrap;gap:10px;justify-content:space-between;align-items:flex-start;padding:12px 20px;border-bottom:4px solid #1d70b8}
+.rpt-title{margin:0;font-size:1.35rem;overflow-wrap:anywhere}
+.rpt-tabs{display:flex;gap:2px;overflow-x:auto;padding:0 12px;border-bottom:1px solid var(--line);flex:none}
+.rpt-tabs button{border:0;background:none;padding:10px 12px;font:inherit;cursor:pointer;white-space:nowrap;border-bottom:3px solid transparent;color:inherit}
+.rpt-tabs button[aria-selected=true]{border-bottom-color:#1d70b8;font-weight:700}
+.rpt-body{flex:1;overflow:auto;padding:14px 20px 40px;max-width:1100px;width:100%;margin:0 auto}
+.rpt-foot{padding:6px 20px;min-height:1.6em;border-top:1px solid var(--line)}
+.rpt-h2{margin:.2rem 0 .3rem}.rpt-h3{font-size:1rem;margin:14px 0 4px}
+.rpt-kv{grid-template-columns:minmax(120px,230px) 1fr}
+.rpt-tw{overflow-x:auto}.rpt-t{border-collapse:collapse;width:100%;font-size:.88rem}.rpt-t th,.rpt-t td{border:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top;overflow-wrap:anywhere}.rpt-t th{background:rgba(127,127,127,.12)}
+.rpt-map{height:min(62vh,560px);border:1px solid var(--line);margin:8px 0}
+.rpt-maphead{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.rpt-chips{display:flex;flex-wrap:wrap;gap:6px}
+.rpchip{border:1px solid var(--line);background:none;color:inherit;border-radius:14px;padding:3px 10px;font:inherit;font-size:.82rem;cursor:pointer;display:inline-flex;gap:6px;align-items:center}
+.rpchip i{width:10px;height:10px;border-radius:50%;display:inline-block}.rpchip[aria-pressed=false]{opacity:.45}.rpchip[aria-pressed=true]{border-color:#1d70b8;font-weight:700}
+.epcbars{display:flex;flex-direction:column;gap:3px;margin:8px 0;max-width:520px}.epcbar{color:#000;padding:3px 8px;font-size:.85rem;display:flex;gap:10px;align-items:center}.epcbar b{min-width:1.2em}
+.pcrow.wrap{flex-wrap:wrap}.pcrow.wrap input,.pcrow.wrap select{max-width:130px}
+body.rpt-open{overflow:hidden}
+@media print{body>*:not(#rptWin){display:none!important}.rptwin{position:static;display:block}.rpt-body{overflow:visible}.rpt-top .actions,.rpt-tabs,.rpt-foot{display:none}}
 .pcrow #zh_url{flex:1;width:auto;min-width:0}
 .dot.arch{background:transparent;border:2px solid var(--zp);width:10px;height:10px;box-sizing:border-box}
 .dot.lr{background:var(--muted)}
@@ -1892,6 +1911,280 @@ function wirePlanning(p){
     catch(e){ b.disabled=false; box.innerHTML='<p class="small muted">'+esc((e&&e.user)||"That did not work. Try again in a minute.")+'</p>'; } });
   if($("plDel")) $("plDel").addEventListener("click",()=>{ st.flash={id:p.id,text:"Planning check removed."}; st.store.update(p.id,{planning:null}); });
 }
+/* ---------- property report: data, sections, window ---------- */
+const OVERPASS=["https://overpass-api.de/api/interpreter","https://overpass.private.coffee/api/interpreter","https://overpass.kumi.systems/api/interpreter"];
+const LRD="https://landregistry.data.gov.uk/data/";
+const BAND_RATIO={A:6,B:7,C:8,D:9,E:11,F:13,G:15,H:18};
+const BAND_LIMIT={A:"Up to £40,000",B:"£40,001 to £52,000",C:"£52,001 to £68,000",D:"£68,001 to £88,000",E:"£88,001 to £120,000",F:"£120,001 to £160,000",G:"£160,001 to £320,000",H:"Over £320,000"};
+const BANDD_DEFAULT={E07000240:{v:2419,note:"Band D charge for St Albans taken from a July 2026 property report; check the council's current figure."}};
+const EPC_COL={A:"#008054",B:"#19b459",C:"#8dce46",D:"#ffd500",E:"#fcaa65",F:"#ef8023",G:"#e9153b"};
+const rpt={id:null,tab:"overview",map:null,layers:{},loading:false,msg:"",base:null,geo:{}};
+const slugOf=n=>String(n||"").toLowerCase().replace(/&/g,"and").replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
+const ladOf=p=>{ const c=lsoaOf(p); return c&&LS[c]?LADS[LS[c].lad]:null; };
+const lsGet=k=>{ try{ return localStorage.getItem(k); }catch(e){ return null; } }, lsSet=(k,v)=>{ try{ localStorage.setItem(k,v); }catch(e){} };
+const miles=m=>(m/1609.344).toFixed(m<1609?2:1)+" miles";
+const typeKey=t=>/flat|maisonette|apartment|studio/i.test(t||"")?"FlatMaisonette":/semi/i.test(t||"")?"SemiDetached":/terrace|end of/i.test(t||"")?"Terraced":/detached|bungalow/i.test(t||"")?"Detached":null;
+const typeName={FlatMaisonette:"Flat or maisonette",SemiDetached:"Semi-detached",Terraced:"Terraced",Detached:"Detached"};
+
+async function ppdRead(p){
+  const pc=normPc(p.postcode||(refOf(p)||{}).pc); if(!pc) throw {user:"no postcode"};
+  const j=await jsonGet(LRD+"ppi/transaction-record.json?propertyAddress.postcode="+encodeURIComponent(pc)+"&_pageSize=200");
+  const items=((j.result||{}).items||[]).map(it=>{ const a=it.propertyAddress||{}, tp=((it.propertyType||{})._about||"").split("/").pop(), es=(((it.estateType||{}).prefLabel||[])[0]||{})._value||"";
+    return {d:String(it.transactionDate||"").slice(0,10),p:it.pricePaid,a:[a.saon,a.paon].filter(Boolean).join(", "),s:a.street||"",t:tp,e:es,nb:!!it.newBuild}; }).filter(x=>typeof x.p==="number").sort((a,b)=>a.d<b.d?1:-1);
+  const m=addrMatcher(p), key=x=>(x.a+" "+x.s).toLowerCase(), here=m?items.filter(x=>m(key(x))):[];
+  const hs={}; here.forEach(x=>hs[x.d+x.p+x.a]=1);
+  return {pc,here:here.slice(0,8),other:items.filter(x=>!hs[x.d+x.p+x.a]).slice(0,12),total:items.length};
+}
+async function hpiRead(p){
+  const L=ladOf(p); if(!L) throw {user:"no district"}; const slug=slugOf(L.name), now=new Date();
+  for(let i=1;i<=7;i++){ const d=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth()-i,1)), ym=d.getUTCFullYear()+"-"+("0"+(d.getUTCMonth()+1)).slice(-2);
+    try{ const j=await jsonGet(LRD+"ukhpi/region/"+slug+"/month/"+ym+".json"), t=(j.result||{}).primaryTopic; if(t&&typeof t.averagePrice==="number"){ const o={region:L.name,month:ym}; ["averagePrice","averagePriceDetached","averagePriceSemiDetached","averagePriceTerraced","averagePriceFlatMaisonette","percentageAnnualChange","percentageAnnualChangeDetached","percentageAnnualChangeSemiDetached","percentageAnnualChangeTerraced","percentageAnnualChangeFlatMaisonette","housePriceIndex"].forEach(k=>{ if(typeof t[k]==="number") o[k]=t[k]; }); return o; } }catch(e){} }
+  throw {user:"no index"};
+}
+async function ovq(q){
+  for(const h of OVERPASS){ try{ const ac=new AbortController(), to=setTimeout(()=>ac.abort(),25000); const r=await fetch(h,{method:"POST",body:"data="+encodeURIComponent(q),signal:ac.signal}); clearTimeout(to); if(!r.ok) continue; const t=await r.text(); try{ return JSON.parse(t).elements||[]; }catch(e){} }catch(e){} }
+  throw {user:"OpenStreetMap was busy"};
+}
+async function osmRead(p){
+  const la=p.lat, ln=p.lng, at=r=>"(around:"+r+","+la+","+ln+")";
+  const ptOf=e=>({x:e.lon!=null?e.lon:(e.center||{}).lon,y:e.lat!=null?e.lat:(e.center||{}).lat});
+  const A=await ovq('[out:json][timeout:20];(node'+at(700)+'[highway=bus_stop];node'+at(4500)+'[railway~"^(station|halt)$"];nwr'+at(1800)+'[amenity=school];);out center 400;');
+  let B=[]; try{ B=await ovq('[out:json][timeout:20];(nwr'+at(800)+'[power~"^(tower|line|minor_line|substation)$"];nwr'+at(2000)+'[man_made=mast];nwr'+at(2000)+'["tower:type"=communication];);out center 250;'); }catch(e){ B=null; }
+  const o={bus:[],rail:[],schools:[],pylon:[],mast:[],gotPower:B!==null}, seen={};
+  const add=(arr,e,extra)=>{ const q=ptOf(e); if(q.x==null||q.y==null) return; arr.push(Object.assign({n:(e.tags&&e.tags.name)||"",x:+q.x.toFixed(6),y:+q.y.toFixed(6),m:hav(ln,la,q.x,q.y)},extra||{})); };
+  A.forEach(e=>{ const t=e.tags||{};
+    if(t.highway==="bus_stop") add(o.bus,e);
+    else if(/^(station|halt)$/.test(t.railway||"")&&t.name&&!/subway|tram/.test(t.station||"")) add(o.rail,e);
+    else if(t.amenity==="school"&&t.name&&!seen[t.name]){ seen[t.name]=1; const nm=t.name, lv=t["isced:level"]||"", k=/nursery/i.test(nm)&&!/primary|infant|junior/i.test(nm)?"Nursery":/primary|infant|junior|first school/i.test(nm)||/^[01]/.test(lv)?"Primary":/secondary|high school|grammar|academy|college|sixth|upper school/i.test(nm)||/[23]/.test(lv)?"Secondary":/special/i.test(nm)?"Special":"School"; add(o.schools,e,{k}); } });
+  (B||[]).forEach(e=>{ const t=e.tags||{}; if(t.power) add(o.pylon,e,{k:t.power}); else add(o.mast,e); });
+  const nearest=(arr,n)=>arr.sort((a,b)=>a.m-b.m).slice(0,n);
+  o.bus=nearest(o.bus,15); o.rail=nearest(o.rail,4); o.schools=nearest(o.schools,25); o.pylon=nearest(o.pylon,40); o.mast=nearest(o.mast,20);
+  return o;
+}
+async function reportLoad(p){
+  if(rpt.loading) return; rpt.loading=true; rptStatus("Reading Land Registry sales, the price index, transport and schools…");
+  const out={at:isoToday(),errors:[]};
+  await Promise.all([ppdRead(p).then(v=>{ out.ppd=v; },()=>out.errors.push("sales history")), hpiRead(p).then(v=>{ out.hpi=v; },()=>out.errors.push("price index"))]);
+  try{ out.osm=await osmRead(p); }catch(e){ out.errors.push("transport and schools"); }
+  const patch={report:out};
+  if(!p.planning){ rptStatus("Reading planning applications and constraints…"); try{ patch.planning=await planningRead(p); }catch(e){ out.errors.push("planning"); } }
+  try{ await st.store.update(p.id,patch); }catch(e){}
+  rpt.loading=false; rptStatus(""); rptRender();
+}
+
+/* ----- the report as sections of plain facts, used for both the window and the Word file ----- */
+const kvs=rows=>({t:"kv",rows:rows.filter(r=>r[1]!==""&&r[1]!=null&&r[1]!==false)});
+const tbl=(head,rows,w)=>({t:"table",head,rows,w});
+const para=(text,o)=>Object.assign({t:"p",text},o||{});
+const bullets=items=>({t:"list",items});
+function bandCost(p,band){ const L=ladOf(p); if(!L||!BAND_RATIO[band]) return null; const s=lsGet("slc_bandD_"+L.code), d=s?Number(s):(BANDD_DEFAULT[L.code]||{}).v; return d>0?Math.round(d*BAND_RATIO[band]/9):null; }
+function reportModel(p){
+  const R=p.report||{}, pl=p.planning, s=sizeOf(p), ls=p.listings||[], rm=ls.find(l=>l.portal==="rightmove")||ls[0]||{}, L=ladOf(p), c=lsoaOf(p), rt=c?rating(c):null, f=rm&&rm.id?facts(rm):null;
+  const band=(ls.map(l=>l.ctax).filter(Boolean)[0])||"", cost=band?bandCost(p,band):null, cons=(pl&&pl.cons)||{}, o=R.osm||null;
+  const lvl=pl?planLevel(pl):null, fl=cons.fl||[], flLevel=pl?(fl.some(x=>/3/.test(String(x)))?"High: inside Flood Zone 3":fl.some(x=>/2/.test(String(x)))?"Medium: inside Flood Zone 2":"Low: outside Flood Zones 2 and 3"):"";
+  const sale=((R.ppd||{}).here||[])[0]||(((p.zhist||{}).sales||[]).slice().sort((a,b)=>a.date<b.date?1:-1)[0]?{d:p.zhist.sales.slice().sort((a,b)=>a.date<b.date?1:-1)[0].date,p:p.zhist.sales.slice().sort((a,b)=>a.date<b.date?1:-1)[0].price,z:true}:null);
+  const stn=o&&o.rail[0], S=[];
+  const flags=[]; if(pl) planFlags(p,pl).forEach(x=>flags.push(x)); s.notes.forEach(x=>flags.push(x));
+  if(sale&&s.price&&sale.p) flags.push("Last sold for "+money(sale.p)+" in "+fmtMY(sale.d)+(sale.z?" (Zoopla's record)":"")+". The asking price is "+(s.price>=sale.p?Math.round((s.price/sale.p-1)*100)+"% above":Math.round((1-s.price/sale.p)*100)+"% below")+" that.");
+  const e=p.epc; if(e&&/^[EFG]$/.test(e.rating||"")) flags.push("The EPC rating is "+e.rating+". Ask about improvement costs and the effect on mortgage and rental options.");
+  S.push({id:"overview",title:"Property overview",intro:"The main facts about this property and its surroundings, drawn from the listing and the sources listed at the end.",blocks:[
+    kvs([["Address",[p.name,p.locality,p.postcode].filter(Boolean).join(", ")],["Asking price",s.price?money(s.price):""],["Agent",rm.agent||""],["Property",[p.type,p.beds?p.beds+" bed":"",p.baths?p.baths+" bath":"",p.tenure,p.newBuild?"New build":""].filter(Boolean).join(", ")],
+      ["Size",s.sqft?nf.format(s.sqft)+" sq ft ("+s.sqm+" sq m)":""],["Price per sq ft",s.psf?"£"+nf.format(s.psf):""],["Price per sq m",s.psm?"£"+nf.format(s.psm):""],
+      ["Council tax",band?"Band "+band+(cost?", about £"+nf.format(cost)+" a year":""):""],["Local authority",L?L.name:""],
+      ["On the market",f&&f.dom!=null?(f.startKnown?"":"at least ")+f.dom+" days":""],
+      ["Conservation area",pl?(cons.ca&&cons.ca.length?"Yes: "+cons.ca.join(", "):"No, per Planning Data"):"Not checked"],["Article 4 direction",pl?(cons.a4&&cons.a4.length?"Yes: "+cons.a4.join(", "):"None found"):""],
+      ["Listed building at the pin",pl?((cons.listed||[]).some(x=>x.m!=null&&x.m<=20)?"Possibly: check the National Heritage List":"None within 20 m"):""],
+      ["Flood risk, rivers and sea",flLevel],["Flood risk, surface water","Check the Environment Agency service (link in the Sources section)"],
+      ["Planning activity",lvl?lvl[0]+": "+lvl[1]+" live applications within 250 m":"Not checked"],
+      ["Area rating",rt?rt.score.toFixed(1)+" / 10, "+rt.band+" (official 2025 deprivation figures, "+LS[c].n+")":""],
+      ["Energy rating",e&&e.rating?e.rating+(e.score?" ("+e.score+")":""):"Not entered"],
+      ["Last sold",sale?money(sale.p)+", "+fmtMY(sale.d):""],["Nearest station",stn?stn.n+", "+miles(stn.m):""]]),
+    flags.length?{t:"h3",text:"Points to check"}:null, flags.length?bullets(flags):null].filter(Boolean)});
+  const mb=[]; if(o){ mb.push(tbl(["Railway station","Distance"],o.rail.map(x=>[x.n,miles(x.m)]))); mb.push(tbl(["Bus stop","Distance"],o.bus.slice(0,8).map(x=>[x.n||"Bus stop",miles(x.m)])));
+    mb.push(para(o.gotPower?"Pylons and power lines within 800 m: "+o.pylon.filter(x=>x.m<=800).length+(o.pylon[0]?" (nearest "+o.pylon[0].m+" m). ":". ")+"Communication masts within 2 km: "+o.mast.length+(o.mast[0]?" (nearest "+o.mast[0].m+" m).":"."):"Pylon and mast data could not be read; use Refresh.")); }
+  else mb.push(para("No transport data yet. Use Refresh data."));
+  S.push({id:"maps",title:"Map and surroundings",intro:"Transport, schools, masts and pylons, planning applications, flood zones and conservation areas around the pin. Switch the layers on the interactive map; the Word file lists the same facts in tables.",blocks:[{t:"map"}].concat(mb)});
+  const bd=L?(lsGet("slc_bandD_"+L.code)?Number(lsGet("slc_bandD_"+L.code)):(BANDD_DEFAULT[L.code]||{}).v):null;
+  S.push({id:"tax",title:"Council tax",intro:"Council tax depends on the band the Valuation Office placed the home in (1991 values in England) and the council's charge for that band.",blocks:[
+    kvs([["Band for this property",band?"Band "+band:"Not shown on the listing"],["Annual cost",cost?"£"+nf.format(cost):""]]),
+    {t:"bandd",value:bd,lad:L?L.code:"",note:(BANDD_DEFAULT[L&&L.code]||{}).note||"Enter the council's Band D charge for the year to price each band."},
+    tbl(["Band","1991 value","Share of Band D","Annual cost"],Object.keys(BAND_RATIO).map(b=>[b+(b===band?" (this property)":""),BAND_LIMIT[b],BAND_RATIO[b]+"/9",bd?"£"+nf.format(Math.round(bd*BAND_RATIO[b]/9)):"Enter Band D"])),
+    para("Neighbouring properties' bands are on the Valuation Office Agency's public search, which has no open feed, so they are not listed here.")]});
+  const R2=R.ppd, hereRows=((R2&&R2.here)||[]).map(x=>[fmtD(x.d),money(x.p),x.a+" "+x.s,[x.t,x.e].filter(Boolean).join(", ")+(x.nb?", new build":"")]);
+  const zs=((p.zhist||{}).sales||[]).slice().sort((a,b)=>a.date<b.date?1:-1);
+  const lb=[]; lb.push(kvs([["Tenure",p.tenure||""],["Last sold",sale?money(sale.p)+" in "+fmtMY(sale.d)+(s.sqft&&sale.p?" (£"+nf.format(Math.round(sale.p/s.sqft))+" per sq ft at today's advertised size)":""):""],["Asking price now",s.price?money(s.price):""]]));
+  if(hereRows.length) lb.push(tbl(["Date","Price","Address","Type"],hereRows)); else if(zs.length) lb.push(tbl(["Date","Price","Source"],zs.map(x=>[fmtMY(x.date),money(x.price),"Zoopla, from HM Land Registry"]))); else lb.push(para(R2?"No sale of this address was found in the Land Registry price-paid data for "+R2.pc+". Sales before 1995, and some recent ones, are not in it.":"Sales history has not been read yet. Use Refresh data."));
+  if(R2&&R2.other.length) { lb.push({t:"h3",text:"Other recent sales in "+R2.pc}); lb.push(tbl(["Date","Price","Address","Type"],R2.other.map(x=>[fmtD(x.d),money(x.p),x.a+" "+x.s,x.t]))); }
+  lb.push(para("Title number, the title plan and any restrictive covenants are held by HM Land Registry and need a paid official copy of the register; ask the seller's solicitor."));
+  S.push({id:"land",title:"Sales history",intro:"What the property and its neighbours sold for, from HM Land Registry's open price-paid data.",blocks:lb});
+  S.push({id:"epc",title:"Energy performance (EPC)",intro:"The Energy Performance Certificate rates running costs and carbon on a scale from A (best) to G. The register cannot be read from this page, so enter the figures from the certificate.",blocks:[
+    {t:"epc",value:e||null}, kvs([["Floor area on the certificate",e&&e.area?e.area+" sq m"+(s.sqm&&Math.abs(e.area-s.sqm)/s.sqm>0.08?" (advertised "+s.sqm+" sq m: ask why they differ)":""):""],["Valid until",e&&e.valid?e.valid:""]]),
+    para("Find the certificate for this address on the government register: https://www.gov.uk/find-energy-certificate")]});
+  const pb=[]; if(pl){ pb.push(para("Planning activity: "+lvl[0]+" ("+lvl[1]+" live applications within 250 m; "+(pl.total!=null?nf.format(pl.total)+" recorded within 500 m. ":"")+"Read "+fmtD(pl.at)+").")); const ff=planFlags(p,pl); pb.push(ff.length?bullets(ff):para("No constraint or warning was found at the pin."));
+    pb.push({t:"h3",text:"Applications at this address"}); pb.push((pl.here||[]).length?tbl(["Reference","Status","Type","Received","Decided","Description"],pl.here.map(a=>[a.u,a.s,a.t,fmtD(a.sd),a.dd?fmtD(a.dd):"",a.d.slice(0,140)])):para("None matched on PlanIt."));
+    const lv=(pl.nearby||[]).filter(a=>LIVE_STATES.test(a.s)).slice(0,10); pb.push({t:"h3",text:"Live applications nearby"}); pb.push(lv.length?tbl(["Reference","Status","Distance","Received","Description"],lv.map(a=>[a.u,a.s,a.m+" m",fmtD(a.sd),a.d.slice(0,140)])):para("None within 250 m."));
+    const dc=(pl.nearby||[]).filter(a=>!LIVE_STATES.test(a.s)).slice(0,10); if(dc.length){ pb.push({t:"h3",text:"Recently decided nearby"}); pb.push(tbl(["Reference","Outcome","Distance","Decided","Description"],dc.map(a=>[a.u,a.s,a.m+" m",a.dd?fmtD(a.dd):"",a.d.slice(0,140)]))); } }
+  else pb.push(para("Planning has not been checked. Use Refresh data."));
+  pb.push({t:"h3",text:"Building regulations"}); pb.push(para("Building regulations and completion certificates are mostly not public. Ask the seller's solicitor for those covering any extension, loft or conversion, and for a local authority search before buying."));
+  S.push({id:"plan",title:"Planning history and constraints",intro:"Planning applications at and around the property, and planning constraints at the pin.",blocks:pb});
+  const H=R.hpi, hb=[];
+  if(H){ const tk=typeKey(p.type), rows=[["All property types",money(H.averagePrice),(H.percentageAnnualChange!=null?H.percentageAnnualChange+"%":"")]].concat(["Detached","SemiDetached","Terraced","FlatMaisonette"].map(k=>[typeName[k],H["averagePrice"+k]!=null?money(H["averagePrice"+k]):"",H["percentageAnnualChange"+k]!=null?H["percentageAnnualChange"+k]+"%":""]));
+    hb.push(para(H.region+", month of "+H.month+". Averages of all sales, not like-for-like.")); hb.push(tbl(["Property type","Average price","Annual change"],rows));
+    if(tk&&H["averagePrice"+tk]&&s.price) hb.push(para("The asking price of "+money(s.price)+" is "+(s.price>=H["averagePrice"+tk]?Math.round((s.price/H["averagePrice"+tk]-1)*100)+"% above":Math.round((1-s.price/H["averagePrice"+tk])*100)+"% below")+" the "+H.region+" average for "+typeName[tk].toLowerCase()+" homes ("+money(H["averagePrice"+tk])+")."));
+    hb.push(para("Average time to sell is not published as open data and is not shown.")); }
+  else hb.push(para("Price statistics have not been read yet. Use Refresh data."));
+  S.push({id:"prices",title:"House price statistics",intro:"The UK House Price Index (HM Land Registry and ONS) for the local authority.",blocks:hb});
+  const sb=[]; if(o){ sb.push(tbl(["School","Phase (from name)","Distance"],o.schools.map(x=>[{t:x.n,u:"https://reports.ofsted.gov.uk/search?q="+encodeURIComponent(x.n)},x.k,miles(x.m)]))); }
+  else sb.push(para("Schools have not been read yet. Use Refresh data."));
+  sb.push(para("Names and positions come from OpenStreetMap. Ofsted ratings and catchment areas are not in an open feed that works from this page, so each school links to Ofsted's report search. Ofsted has changed how it reports on state schools, so a rating seen elsewhere may be out of date. Check the council's admissions page for catchment."));
+  S.push({id:"schools",title:"Local schools",intro:"Schools within about a mile, nearest first.",blocks:sb});
+  S.push({id:"notes",title:"Sources and limits",intro:"",blocks:[bullets([
+    "Listing details: Rightmove and Zoopla, as read from the links you added. Size and price per area are described under Property overview.",
+    "Sales: HM Land Registry price-paid data and UK House Price Index. Contains HM Land Registry data © Crown copyright and database right 2026, licensed under the Open Government Licence v3.0.",
+    "Planning applications: PlanIt (planit.org.uk), which collects council records. Constraints and flood zones: Planning Data (planning.data.gov.uk), Open Government Licence v3.0.",
+    "Transport, schools, masts and pylons: © OpenStreetMap contributors, Open Database Licence. Map tiles: Esri.",
+    "Area rating: English Indices of Deprivation 2025, MHCLG, Open Government Licence v3.0.",
+    "Not included because no open source works from this page: title plan and title number, restrictive covenants, radon, soil and clay, road noise, per-address broadband and mobile coverage, building regulations, and time to sell. Useful official checks: Environment Agency long-term flood risk (https://check-long-term-flood-risk.service.gov.uk/), Ofcom coverage checker (https://checker.ofcom.org.uk/), UKHSA radon map (https://www.ukradon.org/), Defra's noise maps.",
+    "This report is a guide only. It is not a survey, valuation, legal advice or a local authority search. Open data can be incomplete or out of date, and the pin position affects what is found. Check anything that matters with the seller's solicitor and a surveyor."])]});
+  return S;
+}
+
+/* ----- the window ----- */
+const rptEsc=esc;
+function rptStatus(t){ rpt.msg=t; const b=$("rptMsg"); if(b) b.textContent=t||""; }
+function rptCell(c){ if(c&&typeof c==="object"&&c.t!==undefined){ return c.u?'<a href="'+esc(c.u)+'" target="_blank" rel="noopener noreferrer">'+esc(c.t)+'</a>':esc(c.t); } return esc(c==null?"":c); }
+function rptBlock(b,p){
+  if(b.t==="kv") return '<dl class="kv rpt-kv">'+b.rows.map(r=>'<dt>'+esc(r[0])+'</dt><dd>'+esc(r[1])+'</dd>').join("")+'</dl>';
+  if(b.t==="table") return b.rows.length?'<div class="rpt-tw"><table class="rpt-t"><thead><tr>'+b.head.map(h=>'<th>'+esc(h)+'</th>').join("")+'</tr></thead><tbody>'+b.rows.map(r=>'<tr>'+r.map(c=>'<td>'+rptCell(c)+'</td>').join("")+'</tr>').join("")+'</tbody></table></div>':'<p class="small muted">None found.</p>';
+  if(b.t==="list") return '<ul class="checks">'+b.items.map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul>';
+  if(b.t==="p") return '<p class="small">'+esc(b.text)+'</p>';
+  if(b.t==="h3") return '<h3 class="rpt-h3">'+esc(b.text)+'</h3>';
+  if(b.t==="bandd") return '<div class="field"><label class="label" for="rp_bd">Band D charge for '+(ladOf(p)?esc(ladOf(p).name):'the council')+' (£ a year)</label><div class="pcrow"><input id="rp_bd" type="number" min="0" step="1" inputmode="numeric" value="'+(b.value?esc(String(b.value)):"")+'"><button type="button" class="btn quiet" id="rp_bdSave">Save</button></div><p class="small muted">'+esc(b.note)+'</p></div>';
+  if(b.t==="epc"){ const e=b.value||{}, bars=["A","B","C","D","E","F","G"].map((k,i)=>'<div class="epcbar" style="background:'+EPC_COL[k]+';width:'+(38+i*9)+'%"><b>'+k+'</b>'+(e.rating===k?'<span> ◄ now'+(e.score?' '+esc(String(e.score)):'')+'</span>':'')+(e.potential===k?'<span> ◄ potential'+(e.pscore?' '+esc(String(e.pscore)):'')+'</span>':'')+'</div>').join("");
+    return '<div class="epcbars">'+bars+'</div><div class="field"><span class="label">Enter from the certificate</span><div class="pcrow wrap"><select id="rp_er" aria-label="Current rating"><option value="">Rating</option>'+"ABCDEFG".split("").map(k=>'<option'+(e.rating===k?' selected':'')+'>'+k+'</option>').join("")+'</select><input id="rp_es" type="number" min="1" max="100" placeholder="Score" value="'+(e.score||"")+'"><select id="rp_ep" aria-label="Potential rating"><option value="">Potential</option>'+"ABCDEFG".split("").map(k=>'<option'+(e.potential===k?' selected':'')+'>'+k+'</option>').join("")+'</select><input id="rp_eps" type="number" min="1" max="100" placeholder="Pot. score" value="'+(e.pscore||"")+'"><input id="rp_ea" type="number" min="1" step="any" placeholder="Area sq m" value="'+(e.area||"")+'"><input id="rp_ev" type="text" placeholder="Valid until" value="'+esc(e.valid||"")+'"><button type="button" class="btn quiet" id="rp_eSave">Save</button></div></div>'; }
+  if(b.t==="map") return '<div class="rpt-maphead"><div class="seg" id="rpBase" role="group" aria-label="Basemap"><button type="button" data-b="streets" aria-pressed="true">Streets</button><button type="button" data-b="light" aria-pressed="false">Light</button><button type="button" data-b="off" aria-pressed="false">Off</button></div><div class="rpt-chips" id="rpChips"></div></div><div id="rptMap" class="rpt-map" role="application" aria-label="Interactive map of the surroundings"></div><p class="small muted" id="rpMapMsg"></p>';
+  return "";
+}
+function rptRender(){
+  const w=$("rptWin"); if(!w) return; const p=st.props.find(x=>x.id===rpt.id); if(!p){ rptClose(); return; }
+  const S=reportModel(p); if(!S.some(x=>x.id===rpt.tab)) rpt.tab="overview"; const sec=S.find(x=>x.id===rpt.tab);
+  $("rptTitle").textContent=[p.name,p.postcode].filter(Boolean).join(", ");
+  $("rptTabs").innerHTML=S.map(x=>'<button type="button" role="tab" data-t="'+x.id+'" aria-selected="'+(x.id===rpt.tab)+'">'+esc(x.title.replace(/ \(EPC\)| and constraints/,"").replace("Property overview","Overview").replace("Map and surroundings","Map").replace("House price statistics","Prices").replace("Planning history","Planning").replace("Sources and limits","Sources"))+'</button>').join("");
+  const R=p.report, stale=R&&R.at?(Date.now()-new Date(R.at).getTime())/864e5:null;
+  $("rptSub").textContent=R?"Data read "+fmtD(R.at)+(R.errors&&R.errors.length?"; could not read: "+R.errors.join(", "):""):"No data read yet";
+  let h='<h2 class="rpt-h2">'+esc(sec.title)+'</h2>'+(sec.intro?'<p class="small muted">'+esc(sec.intro)+'</p>':"")+sec.blocks.map(b=>rptBlock(b,p)).join("");
+  $("rptBody").innerHTML=h; $("rptMsg").textContent=rpt.msg||"";
+  $("rptTabs").querySelectorAll("button").forEach(b=>b.addEventListener("click",()=>{ rpt.tab=b.dataset.t; rptRender(); }));
+  if($("rp_bdSave")) $("rp_bdSave").addEventListener("click",()=>{ const L=ladOf(p), v=Number($("rp_bd").value); if(L&&v>0){ lsSet("slc_bandD_"+L.code,String(Math.round(v))); rptRender(); } });
+  if($("rp_eSave")) $("rp_eSave").addEventListener("click",async()=>{ const g=id=>$(id).value, n=id=>Number($(id).value)||null, e={rating:g("rp_er"),score:n("rp_es"),potential:g("rp_ep"),pscore:n("rp_eps"),area:n("rp_ea"),valid:g("rp_ev").trim()}; await st.store.update(p.id,{epc:e.rating?e:null}); rptRender(); });
+  if(sec.id==="maps") rptMapInit(p);
+}
+function rptClose(){ const w=$("rptWin"); if(rpt.map){ rpt.map.remove(); rpt.map=null; } if(w) w.remove(); document.body.classList.remove("rpt-open"); rpt.id=null; }
+function openReport(id){
+  rptClose(); const p=st.props.find(x=>x.id===id); if(!p) return; rpt.id=id; rpt.tab="overview";
+  const w=document.createElement("div"); w.id="rptWin"; w.className="rptwin"; w.setAttribute("role","dialog"); w.setAttribute("aria-modal","true"); w.setAttribute("aria-labelledby","rptTitle");
+  w.innerHTML='<div class="rpt-top"><div><span class="small muted">Property report</span><h1 id="rptTitle" class="rpt-title"></h1><span class="small muted" id="rptSub"></span></div><div class="actions"><button type="button" class="btn" id="rptWord">Export to Word</button><button type="button" class="btn quiet" id="rptPrint">Print</button>'+(STANDALONE?'<button type="button" class="btn quiet" id="rptRef">Refresh data</button>':'')+'<button type="button" class="btn quiet" id="rptX">Close</button></div></div><div class="rpt-tabs" id="rptTabs" role="tablist"></div><div class="rpt-body" id="rptBody"></div><div class="rpt-foot small" id="rptMsg" role="status"></div>';
+  document.body.appendChild(w); document.body.classList.add("rpt-open");
+  $("rptX").addEventListener("click",rptClose); $("rptPrint").addEventListener("click",()=>window.print());
+  $("rptWord").addEventListener("click",()=>{ const q=st.props.find(x=>x.id===rpt.id); if(q) exportDocx(q); });
+  if($("rptRef")) $("rptRef").addEventListener("click",()=>{ const q=st.props.find(x=>x.id===rpt.id); if(q) reportLoad(q); });
+  w.addEventListener("keydown",e=>{ if(e.key==="Escape") rptClose(); });
+  rptRender(); const b=$("rptX"); if(b) b.focus();
+  const R=p.report, old=!R||!R.at||(Date.now()-new Date(R.at).getTime())>7*864e5;
+  if(STANDALONE&&old&&typeof p.lat==="number") reportLoad(p);
+}
+
+/* ----- the interactive map ----- */
+function wktPolys(w){ const out=[]; String(w||"").replace(/\(([-\d.eE\s,]+)\)/g,(m,body)=>{ const ring=body.split(",").map(pt=>{ const q=pt.trim().split(/\s+/); return [Number(q[1]),Number(q[0])]; }).filter(a=>isFinite(a[0])&&isFinite(a[1])); if(ring.length>2) out.push(ring); return m; }); return out; }
+async function rptGeo(p){
+  if(rpt.geo[p.id]) return rpt.geo[p.id]; const box=wktBox(p.lng,p.lat,900), g={};
+  const get=async ds=>{ try{ const j=await jsonGet(PDATA+"geometry="+encodeURIComponent(box)+"&geometry_relation=intersects&dataset="+ds+"&limit=30"); return (j.entities||[]).map(e=>({n:e.name||ds,r:e["flood-risk-level"]||"",polys:wktPolys(e.geometry)})); }catch(e){ return null; } };
+  const [fl,ca]=await Promise.all([get("flood-risk-zone"),get("conservation-area")]); g.fl=fl; g.ca=ca; rpt.geo[p.id]=g; return g;
+}
+function rptMapInit(p){
+  const el=$("rptMap"); if(!el) return; if(!window.L){ el.textContent="The map library did not load."; return; } if(typeof p.lat!=="number"){ el.textContent="This property has no map pin."; return; }
+  if(rpt.map){ rpt.map.remove(); rpt.map=null; }
+  const m=L.map(el).setView([p.lat,p.lng],15); rpt.map=m; const R=p.report||{}, o=R.osm||{}, pl=p.planning||{}, base={};
+  ["streets","light"].forEach(k=>{ base[k]=L.layerGroup(BASEMAPS[k].map(([u,z])=>L.tileLayer(u,{maxZoom:z,attribution:k==="streets"?"Tiles © Esri":"Tiles © Esri"}))); });
+  let cur=null; const setBase=k=>{ if(cur) m.removeLayer(cur); cur=base[k]||null; if(cur) cur.addTo(m); document.querySelectorAll("#rpBase button").forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.b===k))); }; setBase("streets");
+  document.querySelectorAll("#rpBase button").forEach(b=>b.addEventListener("click",()=>setBase(b.dataset.b)));
+  L.circle([p.lat,p.lng],{radius:250,weight:1,color:"#1d70b8",fill:false,dashArray:"4 4"}).addTo(m);
+  L.circleMarker([p.lat,p.lng],{radius:9,weight:3,color:"#fff",fillColor:"#d4351c",fillOpacity:1}).addTo(m).bindPopup("<b>"+esc(p.name||"Property")+"</b>");
+  const pop=(t,x)=>{ const d=document.createElement("div"); d.innerHTML=t; return d; }, cm=(x,y,col,r,tip)=>L.circleMarker([y,x],{radius:r,weight:1.5,color:"#222",fillColor:col,fillOpacity:.85}).bindPopup(pop(tip));
+  const G={tr:L.layerGroup(),sc:L.layerGroup(),mp:L.layerGroup(),pa:L.layerGroup(),fl:L.layerGroup(),ca:L.layerGroup()}, tip={tr:"Transport",sc:"Schools",mp:"Masts and pylons",pa:"Planning applications",fl:"Flood zones 2 and 3",ca:"Conservation areas"}, col={tr:"#1d70b8",sc:"#00703c",mp:"#912b88",pa:"#f47738",fl:"#2b8cbe",ca:"#6f9d3b"};
+  (o.bus||[]).forEach(x=>cm(x.x,x.y,"#1d70b8",4,"<b>"+esc(x.n||"Bus stop")+"</b><br>"+miles(x.m)).addTo(G.tr)); (o.rail||[]).forEach(x=>cm(x.x,x.y,"#0b0c0c",8,"<b>"+esc(x.n)+"</b><br>Railway station, "+miles(x.m)).addTo(G.tr));
+  (o.schools||[]).forEach(x=>cm(x.x,x.y,"#00703c",6,"<b>"+esc(x.n)+"</b><br>"+esc(x.k)+", "+miles(x.m)+'<br><a href="https://reports.ofsted.gov.uk/search?q='+encodeURIComponent(x.n)+'" target="_blank" rel="noopener noreferrer">Ofsted reports ↗</a>').addTo(G.sc));
+  (o.pylon||[]).concat(o.mast||[]).forEach(x=>cm(x.x,x.y,"#912b88",5,"<b>"+esc(x.k?("Power: "+x.k):"Mast")+"</b><br>"+x.m+" m").addTo(G.mp));
+  (pl.here||[]).concat(pl.nearby||[]).forEach(a=>{ if(typeof a.x!=="number") return; const lv=LIVE_STATES.test(a.s); cm(a.x,a.y,lv?"#f59e0b":"#94a3b8",lv?6:4,"<b>"+esc(a.u)+"</b><br>"+esc(a.s)+"<br>"+esc(a.d.slice(0,140))+((a.l||a.pl)?'<br><a href="'+esc(a.l||a.pl)+'" target="_blank" rel="noopener noreferrer">Council record ↗</a>':"")).addTo(G.pa); });
+  const on={tr:true,sc:true,mp:false,pa:true,fl:true,ca:true}; Object.keys(G).forEach(k=>{ if(on[k]) G[k].addTo(m); });
+  $("rpChips").innerHTML=Object.keys(G).map(k=>'<button type="button" class="rpchip" data-k="'+k+'" aria-pressed="'+!!on[k]+'"><i style="background:'+col[k]+'"></i>'+tip[k]+'</button>').join("");
+  $("rpChips").querySelectorAll("button").forEach(b=>b.addEventListener("click",()=>{ const k=b.dataset.k, v=b.getAttribute("aria-pressed")!=="true"; b.setAttribute("aria-pressed",String(v)); v?G[k].addTo(m):m.removeLayer(G[k]); }));
+  rpt.layers=G; setTimeout(()=>m.invalidateSize(),60);
+  const msg=$("rpMapMsg"); if(!R.osm&&msg) msg.textContent="Transport and schools are not loaded yet. Use Refresh data.";
+  if(STANDALONE){ if(msg&&R.osm) msg.textContent="Loading flood zones and conservation areas…"; rptGeo(p).then(g=>{ if(rpt.map!==m) return;
+    (g.fl||[]).forEach(z=>z.polys.forEach(poly=>L.polygon(poly,{color:"#2b8cbe",weight:1,fillOpacity:.25}).bindPopup("Flood zone "+esc(String(z.r||""))).addTo(G.fl)));
+    (g.ca||[]).forEach(z=>z.polys.forEach(poly=>L.polygon(poly,{color:"#6f9d3b",weight:1,fillOpacity:.2}).bindPopup("Conservation area: "+esc(z.n)).addTo(G.ca)));
+    if(msg) msg.textContent=(g.fl===null||g.ca===null?"Some area layers could not be read. ":"")+((g.fl||[]).length?"":"No Flood Zone 2 or 3 within 900 m. ")+((g.ca||[]).length?"":"No conservation area within 900 m."); }); }
+}
+/* ---------- Word (.docx) export: a small zip writer and the document XML ---------- */
+const CRC_T=(()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=c&1?0xEDB88320^(c>>>1):c>>>1; t[n]=c>>>0; } return t; })();
+const crc32=u=>{ let c=0xFFFFFFFF; for(let i=0;i<u.length;i++) c=CRC_T[(c^u[i])&255]^(c>>>8); return (c^0xFFFFFFFF)>>>0; };
+function zipStore(files){ // files: [[name, string]] stored without compression
+  const enc=new TextEncoder(), parts=[], cen=[]; let off=0;
+  const u16=n=>[n&255,(n>>8)&255], u32=n=>[n&255,(n>>8)&255,(n>>16)&255,(n>>>24)&255];
+  files.forEach(([name,txt])=>{ const nb=enc.encode(name), d=enc.encode(txt), crc=crc32(d);
+    const lh=[0x50,0x4b,3,4,...u16(20),...u16(0x0800),...u16(0),...u16(0),...u16(0x21),...u32(crc),...u32(d.length),...u32(d.length),...u16(nb.length),...u16(0)];
+    parts.push(new Uint8Array(lh),nb,d);
+    cen.push(new Uint8Array([0x50,0x4b,1,2,...u16(20),...u16(20),...u16(0x0800),...u16(0),...u16(0),...u16(0x21),...u32(crc),...u32(d.length),...u32(d.length),...u16(nb.length),...u16(0),...u16(0),...u16(0),...u16(0),...u32(0),...u32(off)]),nb);
+    off+=lh.length+nb.length+d.length; });
+  let cl=0; cen.forEach(x=>cl+=x.length);
+  const end=new Uint8Array([0x50,0x4b,5,6,0,0,0,0,...u16(files.length),...u16(files.length),...u32(cl),...u32(off),0,0]);
+  return new Blob(parts.concat(cen,[end]),{type:"application/vnd.openxmlformats-officedocument.wordprocessingml.document"});
+}
+const WX=s=>String(s==null?"":s).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g,"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const wRun=(t,o)=>{ o=o||{}; return '<w:r><w:rPr>'+(o.b?'<w:b/>':'')+(o.i?'<w:i/>':'')+(o.color?'<w:color w:val="'+o.color+'"/>':'')+(o.sz?'<w:sz w:val="'+o.sz+'"/>':'')+'</w:rPr><w:t xml:space="preserve">'+WX(t)+'</w:t></w:r>'; };
+const wPara=(t,o)=>{ o=o||{}; return '<w:p><w:pPr>'+(o.style?'<w:pStyle w:val="'+o.style+'"/>':'')+(o.bullet?'<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>':'')+(o.after!=null?'<w:spacing w:after="'+o.after+'"/>':'')+'</w:pPr>'+wRun(t,o)+'</w:p>'; };
+function wTable(head,rows,widths){
+  const n=(head||rows[0]||[]).length||1, W=9300, ws=widths||Array.from({length:n},()=>Math.floor(W/n));
+  const cell=(c,w,hd)=>'<w:tc><w:tcPr><w:tcW w:w="'+w+'" w:type="dxa"/>'+(hd?'<w:shd w:val="clear" w:color="auto" w:fill="E7ECF1"/>':'')+'</w:tcPr><w:p><w:pPr><w:spacing w:after="40"/></w:pPr>'+wRun(c&&typeof c==="object"&&c.t!==undefined?c.t:c,{b:hd,sz:18})+'</w:p></w:tc>';
+  const row=(r,hd)=>'<w:tr>'+(hd?'<w:trPr><w:tblHeader/></w:trPr>':'')+r.map((c,i)=>cell(c,ws[i]||ws[ws.length-1],hd)).join("")+'</w:tr>';
+  return '<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="'+ws.reduce((a,b)=>a+b,0)+'" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid>'+ws.map(w=>'<w:gridCol w:w="'+w+'"/>').join("")+'</w:tblGrid>'+(head?row(head,true):"")+rows.map(r=>row(r,false)).join("")+'</w:tbl>'+wPara("",{after:80});
+}
+function docxBody(p,S){
+  const b=[]; b.push(wPara("Property report",{style:"Title"})); b.push(wPara([p.name,p.locality,p.postcode].filter(Boolean).join(", "),{style:"Subtitle"}));
+  b.push(wPara("Prepared "+fmtD(isoToday())+(p.report&&p.report.at?". Data read "+fmtD(p.report.at)+".":"."),{i:true,color:"555555",sz:18}));
+  b.push(wPara("A guide to the property and its surroundings from open data and the listing. It is not a survey, valuation, legal advice or a local authority search.",{i:true,color:"555555",sz:18}));
+  S.forEach(sec=>{ b.push(wPara(sec.title,{style:"Heading1"})); if(sec.intro) b.push(wPara(sec.intro,{i:true,color:"555555",sz:18}));
+    sec.blocks.forEach(x=>{
+      if(x.t==="kv") b.push(wTable(null,x.rows.map(r=>[{t:r[0]},r[1]]),[2700,6600]));
+      else if(x.t==="table") b.push(x.rows.length?wTable(x.head,x.rows):wPara("None found.",{sz:18}));
+      else if(x.t==="list") x.items.forEach(i=>b.push(wPara(i,{bullet:true,sz:20,after:60})));
+      else if(x.t==="p") b.push(wPara(x.text,{sz:20}));
+      else if(x.t==="h3") b.push(wPara(x.text,{style:"Heading2"}));
+      else if(x.t==="bandd") b.push(wPara(x.value?"Band D charge used: £"+nf.format(x.value)+" a year. "+x.note:x.note,{sz:18}));
+      else if(x.t==="epc") b.push(wPara(x.value&&x.value.rating?"Current rating "+x.value.rating+(x.value.score?" ("+x.value.score+")":"")+(x.value.potential?"; potential "+x.value.potential+(x.value.pscore?" ("+x.value.pscore+")":""):""):"Rating not entered.",{b:true}));
+      else if(x.t==="map") b.push(wPara("The interactive map (transport, schools, masts and pylons, planning applications, flood zones, conservation areas) is in the report window. The same facts are listed below.",{sz:18}));
+    }); });
+  return b.join("");
+}
+function exportDocx(p){
+  const S=reportModel(p), W='xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const sty=(id,name,rpr,ppr,type)=>'<w:style w:type="'+(type||"paragraph")+'" w:styleId="'+id+'"><w:name w:val="'+name+'"/>'+(id==="Normal"?'':'<w:basedOn w:val="Normal"/>')+'<w:qFormat/>'+(ppr?'<w:pPr>'+ppr+'</w:pPr>':'')+'<w:rPr>'+rpr+'</w:rPr></w:style>';
+  const styles='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles '+W+'><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/><w:sz w:val="20"/><w:lang w:val="en-GB"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="120" w:line="264" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>'+
+    '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>'+
+    sty("Title","Title",'<w:b/><w:color w:val="0B0C0C"/><w:sz w:val="48"/>','<w:spacing w:after="60"/>')+sty("Subtitle","Subtitle",'<w:color w:val="1D70B8"/><w:sz w:val="28"/>','<w:spacing w:after="120"/>')+
+    sty("Heading1","heading 1",'<w:b/><w:color w:val="1D70B8"/><w:sz w:val="32"/>','<w:keepNext/><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="2" w:color="1D70B8"/></w:pBdr><w:spacing w:before="360" w:after="120"/><w:outlineLvl w:val="0"/>')+
+    sty("Heading2","heading 2",'<w:b/><w:sz w:val="24"/>','<w:keepNext/><w:spacing w:before="200" w:after="80"/><w:outlineLvl w:val="1"/>')+
+    '<w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="4" w:color="B1B4B6"/><w:left w:val="single" w:sz="4" w:color="B1B4B6"/><w:bottom w:val="single" w:sz="4" w:color="B1B4B6"/><w:right w:val="single" w:sz="4" w:color="B1B4B6"/><w:insideH w:val="single" w:sz="4" w:color="B1B4B6"/><w:insideV w:val="single" w:sz="4" w:color="B1B4B6"/></w:tblBorders><w:tblCellMar><w:left w:w="80" w:type="dxa"/><w:right w:w="80" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>';
+  const numbering='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering '+W+'><w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="540" w:hanging="270"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>';
+  const doc='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document '+W+'><w:body>'+docxBody(p,S)+'<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1304" w:bottom="1134" w:left="1304" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body></w:document>';
+  const ct='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>';
+  const rels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>';
+  const drels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>';
+  const blob=zipStore([["[Content_Types].xml",ct],["_rels/.rels",rels],["word/document.xml",doc],["word/styles.xml",styles],["word/numbering.xml",numbering],["word/_rels/document.xml.rels",drels]]);
+  const nm="Property-report-"+(slugOf([p.name,p.postcode].filter(Boolean).join(" "))||"property")+".docx";
+  download(nm,blob,blob.type); rptStatus("Saved "+nm+" to your downloads.");
+}
 /* ---------- files: export, import, a copy to share, the Excel template, batch import ---------- */
 function download(name,data,type){ const u=URL.createObjectURL(new Blob([data],{type})); const el=document.createElement("a"); el.href=u; el.download=name; document.body.appendChild(el); el.click(); el.remove(); setTimeout(()=>URL.revokeObjectURL(u),5000); }
 const embedJson=o=>JSON.stringify(o).replace(/</g,"\\u003c").replace(/\u2028|\u2029/g,"");
@@ -2071,6 +2364,7 @@ function detail(p){
   let h='<div class="panel-head"><button type="button" class="btn quiet" id="backBtn">← All properties</button><span class="small muted">'+(p.checkedOn?"Checked "+esc(fmtD(p.checkedOn)):"")+'</span></div>';
   if(st.flash&&st.flash.id===p.id) h+='<p class="flash" role="status">'+esc(st.flash.text)+'</p>';
   h+='<div><h2>'+esc(p.name||"Property")+'</h2><p class="muted">'+esc([p.locality,p.postcode].filter(Boolean).join(" · "))+'</p><p class="small">'+esc([p.beds?p.beds+" bed":"",p.type,sizeShort(p),p.tenure,p.newBuild?"New build":""].filter(Boolean).join(" · "))+'</p></div>';
+  if(STANDALONE) h+='<div class="actions"><button type="button" class="btn" id="rptBtn">Open property report</button></div>';
   if(canEdit) h+='<div class="actions"><button type="button" class="btn quiet" id="moveBtn" aria-pressed="'+(st.moving===p.id)+'">'+(st.moving===p.id?"Stop moving the pin":"Move the pin")+'</button><span class="small muted">'+(st.moving===p.id?"Drag this property's price tag to its new position.":esc("Pin "+(p.pinNote||"at the postcode centre")))+'</span></div>';
   h+='<div class="portals">';
   ["rightmove","zoopla"].forEach(k=>{
@@ -2271,6 +2565,7 @@ function eventForm(p){
 }
 function wireDetail(p){
   $("backBtn").addEventListener("click",()=>select(null,false));
+  if($("rptBtn")) $("rptBtn").addEventListener("click",()=>openReport(p.id));
   if($("zfBtn")) $("zfBtn").addEventListener("click",()=>{ const r=(p.listings||[]).find(l=>l.portal==="rightmove");
     zooplaFinder("zf_det",{pc:r.pc||p.postcode,beds:p.beds,price:r.price},u=>{ $("al_zoopla").value=u; $("rd_al_zoopla").querySelector(".rd-go").click(); },false); });
   if($("moveBtn")) $("moveBtn").addEventListener("click",()=>{ st.moving=st.moving===p.id?null:p.id; st.flash=null; if(map) map.closePopup(); drawPins(); drawPanel(); if(st.moving) $("map").scrollIntoView({block:"nearest",behavior:"smooth"}); });
