@@ -872,6 +872,24 @@ details>summary{cursor:pointer;margin:6px 0}
 .epcbars{display:flex;flex-direction:column;gap:3px;margin:8px 0;max-width:520px}.epcbar{color:#000;padding:3px 8px;font-size:.85rem;display:flex;gap:10px;align-items:center}.epcbar b{min-width:1.2em}
 .pcrow.wrap{flex-wrap:wrap}.pcrow.wrap input,.pcrow.wrap select{max-width:130px}
 body.rpt-open{overflow:hidden}
+.ptabs{display:flex;gap:0;overflow-x:auto;border-bottom:1px solid var(--line);margin:10px -4px 4px;scrollbar-width:thin}
+.ptabs button{flex:none;border:0;background:none;color:inherit;font:inherit;font-size:14px;padding:9px 10px;cursor:pointer;border-bottom:3px solid transparent;white-space:nowrap}
+.ptabs button[aria-selected=true]{border-bottom-color:var(--accent);font-weight:700}
+.ptabs button:focus-visible{outline:3px solid #ffdd00;outline-offset:-3px}
+.ptpanel{padding-top:6px}.pthead{margin:18px 0 4px;font-size:1.05rem;border-top:2px solid var(--line);padding-top:10px}
+.dhead h2{margin-bottom:2px}.dprices{display:flex;gap:14px;flex-wrap:wrap;font-weight:700;font-size:1.05rem;margin-top:4px}.dprices .dot{margin-right:5px}
+.dacts{margin-top:8px}.pinnote{margin:4px 0 0}
+.sumkv{grid-template-columns:minmax(90px,130px) 1fr;margin-bottom:14px}
+.cklist{list-style:none;margin:6px 0;padding:0}.cklist li{display:flex;gap:10px;align-items:center;padding:7px 0;border-top:1px solid var(--line)}
+.cklabel{flex:1;min-width:0;overflow-wrap:anywhere}.cklist .btn{flex:none}
+.ckdot{width:12px;height:12px;border-radius:50%;border:2px solid var(--muted);flex:none}.ckdot.ok{background:var(--ok);border-color:var(--ok)}
+.flagline{border-left:3px solid var(--accent);padding-left:8px}
+.linkbtn{border:0;background:none;color:var(--link,#1d70b8);text-decoration:underline;cursor:pointer;font:inherit;padding:0}
+.batchline{margin:4px 0 8px}
+.dlg{border:1px solid var(--line);border-radius:6px;padding:0;width:min(680px,94vw);max-height:88vh;background:var(--surface);color:var(--ink)}
+.dlg::backdrop{background:rgba(0,0,0,.45)}
+.dlg-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 16px;border-bottom:4px solid #1d70b8;position:sticky;top:0;background:var(--surface)}
+.dlg-head h2{margin:0;font-size:1.2rem}.dlg-body{padding:12px 16px 18px;overflow:auto}
 @media print{body>*:not(#rptWin){display:none!important}.rptwin{position:static;display:block}.rpt-body{overflow:visible}.rpt-top .actions,.rpt-tabs,.rpt-foot{display:none}}
 .pcrow #zh_url{flex:1;width:auto;min-width:0}
 .dot.arch{background:transparent;border:2px solid var(--zp);width:10px;height:10px;box-sizing:border-box}
@@ -2197,16 +2215,31 @@ function exportDocx(p){
 const POLICE="https://data.police.uk/api/";
 const CRIME_NAME={"anti-social-behaviour":"Anti-social behaviour","bicycle-theft":"Bicycle theft","burglary":"Burglary","criminal-damage-arson":"Criminal damage and arson","drugs":"Drugs","other-theft":"Other theft","possession-of-weapons":"Possession of weapons","public-order":"Public order","robbery":"Robbery","shoplifting":"Shoplifting","theft-from-the-person":"Theft from the person","vehicle-crime":"Vehicle crime","violent-crime":"Violence and sexual offences","other-crime":"Other crime"};
 const CRIME_GROUPS=[["Shop and other theft",["shoplifting","other-theft"]],["Violence and sexual offences",["violent-crime"]],["Burglary, vehicle crime and damage",["burglary","vehicle-crime","criminal-damage-arson","bicycle-theft"]],["Anti-social behaviour and public order",["anti-social-behaviour","public-order"]]];
-async function pjson(url){ const r=await fetch(url); if(!r.ok) throw {user:r.status===503?"Too many crimes in that month for the police service to return.":"The police data service could not be reached."}; return r.json(); }
-async function crimeRead(p){
+const sleepMs=t=>new Promise(r=>setTimeout(r,t));
+async function pjson(url){ const r=await fetch(url); if(!r.ok) throw {status:r.status,user:r.status===503?"Too many crimes in that month for the police service to return.":"The police data service could not be reached."}; return r.json(); }
+async function crimeMonth(lat,lng,ym,fresh){ // one month around a fixed point; kept in this browser so a repeat check gives the same answer
+  const key="slc_crm_"+lat.toFixed(5)+","+lng.toFixed(5)+"_"+ym; if(!fresh){ const c=lsGet(key); if(c){ try{ return Object.assign(JSON.parse(c),{cached:true}); }catch(e){} } }
+  const back=window.__crBack!=null?window.__crBack:700;
+  for(let a=0;a<5;a++){
+    try{ const j=await pjson(POLICE+"crimes-street/all-crime?lat="+lat.toFixed(6)+"&lng="+lng.toFixed(6)+"&date="+ym), cats={}, streets={};
+      j.forEach(x=>{ cats[x.category]=(cats[x.category]||0)+1; const s=((x.location||{}).street||{}).name; if(s) streets[s]=(streets[s]||0)+1; });
+      const o={n:j.length,cats,streets}; lsSet(key,JSON.stringify(o)); return o; }
+    catch(e){ if(e&&e.status===503) throw e; }   // the service refuses busy requests without saying so: wait and ask again
+    await sleepMs(back*Math.pow(2,a)); }
+  return null;
+}
+async function crimeRead(p,prev,progress){
   if(typeof p.lat!=="number"||typeof p.lng!=="number") throw {user:"This property has no map pin yet."};
-  const upd=String((await pjson(POLICE+"crime-last-updated")).date||"").slice(0,7); if(!/^\d{4}-\d{2}$/.test(upd)) throw {user:"The police data service gave no date."};
+  let upd=""; for(let a=0;a<3&&!upd;a++){ try{ upd=String((await pjson(POLICE+"crime-last-updated")).date||"").slice(0,7); }catch(e){ await sleepMs(800); } }
+  if(!/^\d{4}-\d{2}$/.test(upd)) throw {user:"The police data service could not be reached. Try again in a minute."};
   const months=[]; let y=Number(upd.slice(0,4)), m=Number(upd.slice(5)); for(let i=0;i<12;i++){ months.unshift(y+"-"+("0"+m).slice(-2)); m--; if(m===0){ m=12; y--; } }
-  const cats={}, streets={}, per=[]; let ok=0, total=0;
-  for(const ym of months){ try{ const j=await pjson(POLICE+"crimes-street/all-crime?lat="+p.lat+"&lng="+p.lng+"&date="+ym); ok++; per.push([ym,j.length]); total+=j.length;
-      j.forEach(x=>{ cats[x.category]=(cats[x.category]||0)+1; const s=((x.location||{}).street||{}).name; if(s) streets[s]=(streets[s]||0)+1; }); }catch(e){ per.push([ym,null]); } }
-  if(!ok) throw {user:"The police data service could not be reached."};
-  return {at:isoToday(),upd,from:months[0],lat:p.lat,lng:p.lng,total,months:per,cats,streets:Object.keys(streets).map(k=>[k,streets[k]]).sort((a,b)=>b[1]-a[1]).slice(0,8),got:ok};
+  const lat=p.lat, lng=p.lng, cats={}, streets={}, per=[], gap=window.__crGap!=null?window.__crGap:300; let total=0, miss=0, i=0;
+  for(const ym of months){ i++; if(progress) progress("Reading police data, month "+i+" of 12…");
+    const r=await crimeMonth(lat,lng,ym,false); if(r&&!r.cached) await sleepMs(gap);
+    if(!r){ miss++; per.push([ym,null]); continue; }
+    per.push([ym,r.n]); total+=r.n; Object.keys(r.cats).forEach(k=>cats[k]=(cats[k]||0)+r.cats[k]); Object.keys(r.streets).forEach(k=>streets[k]=(streets[k]||0)+r.streets[k]); }
+  if(miss) throw {user:"police.uk did not answer for "+miss+" of the 12 months, so nothing was changed. Try again in a minute; months already read are kept and will not be fetched again."};
+  return {at:isoToday(),upd,from:months[0],lat,lng,total,months:per,cats,streets:Object.keys(streets).map(k=>[k,streets[k]]).sort((a,b)=>b[1]-a[1]||(a[0]<b[0]?-1:1)).slice(0,8),got:12};
 }
 function crimeFacts(c){
   if(!c||!c.total) return null; const T=c.total, g=CRIME_GROUPS.map(([n,ks])=>{ const v=ks.reduce((a,k)=>a+(c.cats[k]||0),0); return {n,v,pc:Math.round(v/T*100)}; });
@@ -2223,20 +2256,133 @@ function crimeBlock(p,canEdit){
     if(canEdit&&STANDALONE) h+='<div class="actions"><button type="button" class="btn quiet" id="crBtn">Read recorded crime</button></div><div id="cr_box"></div>'; else h+='<p class="small muted">This needs the standalone file.</p>';
     return h+'</div>'; }
   const f=crimeFacts(c); if(!f) return h+'<p class="small">No crimes were recorded within the area in these months.</p></div>';
-  h+='<p class="small"><b>'+nf.format(f.T)+' crimes recorded</b> within about a mile of the pin, '+esc(fmtMY(c.from+"-01"))+' to '+esc(fmtMY(c.upd+"-01"))+' (about '+f.avg+' a month).</p>'+
+  const moved=typeof c.lat==="number"&&(Math.abs(c.lat-p.lat)>1e-5||Math.abs(c.lng-p.lng)>1e-5);
+  h+='<p class="small"><b>'+nf.format(f.T)+' crimes recorded</b> within about a mile of this address\'s map pin, '+esc(fmtMY(c.from+"-01"))+' to '+esc(fmtMY(c.upd+"-01"))+' (about '+f.avg+' a month).</p>'+
     '<ul class="checks">'+f.g.map(x=>'<li>'+esc(x.n)+': <b>'+x.v+'</b> ('+x.pc+'%)</li>').join("")+'</ul>'+
     '<p class="small muted">Most common: '+esc(f.top.slice(0,4).map(x=>(CRIME_NAME[x[0]]||x[0]).toLowerCase()+" "+x[1]).join(", "))+'.'+(c.streets[0]?' Most reports are logged "on or near" '+esc(c.streets.slice(0,4).map(x=>x[0].replace(/^On or near /i,"")+" ("+x[1]+")").join(", "))+'.':'')+'</p>';
   const nt=crimeNote(p,c); if(nt) h+='<p class="small">'+esc(nt)+'</p>';
+  if(moved) h+='<p class="small flagline">The pin has moved since this was read. Check again to centre it on the new position.</p>';
   h+='<div class="actions">'+(canEdit&&STANDALONE?'<button type="button" class="btn quiet" id="crBtn">Check again</button><button type="button" class="btn quiet" id="crDel">Remove</button>':'')+'</div><div id="cr_box"></div>'+
-    '<p class="small muted">Read '+esc(fmtD(c.at))+' from data.police.uk (Open Government Licence). These are counts within a one-mile circle, not rates, so a busy town centre or shops inside the circle raise them. Police.uk places each crime at a nearby street point, not at a house, and some forces or months can be missing. Crystal Roof uses the same police data but converts it to a rate for a smaller area, so the two will differ.</p></div>';
+    '<p class="small muted">Read '+esc(fmtD(c.at))+' from data.police.uk (Open Government Licence). The figures are fixed to the pin: each month is kept once read, so checking again gives the same totals until police.uk publishes a new month. These are counts within a one-mile circle, not rates, so a busy town centre or shops inside the circle raise them. Police.uk places each crime at a nearby street point, not at a house, and some forces or months can be missing. Crystal Roof uses the same police data but converts it to a rate for a smaller area, so the two will differ.</p></div>';
   return h;
 }
 function wireCrime(p){
   if($("crBtn")) $("crBtn").addEventListener("click",async()=>{ const b=$("crBtn"), box=$("cr_box"); b.disabled=true; box.innerHTML='<p class="small muted">Reading 12 months of police data…</p>';
-    try{ const c=await crimeRead(p); st.flash={id:p.id,text:"Recorded crime read: "+nf.format(c.total)+" crimes within about a mile in 12 months."}; await st.store.update(p.id,{crime:c}); }
+    try{ const c=await crimeRead(p,p.crime,t=>{ box.innerHTML='<p class="small muted">'+esc(t)+'</p>'; }); st.flash={id:p.id,text:"Recorded crime read: "+nf.format(c.total)+" crimes within about a mile in 12 months."}; await st.store.update(p.id,{crime:c}); }
     catch(e){ b.disabled=false; box.innerHTML='<p class="small muted">'+esc((e&&e.user)||"That did not work. Try again in a minute.")+'</p>'; } });
   if($("crDel")) $("crDel").addEventListener("click",()=>{ st.flash={id:p.id,text:"Recorded crime removed."}; st.store.update(p.id,{crime:null}); });
 }
+/* ---------- property view: tabs, summary, run all checks; the list tools dialog ---------- */
+const PTABS=[["summary","Summary"],["listings","Listings"],["value","Size and value"],["area","Area and crime"],["planning","Planning"],["all","All"]];
+const ptabNow=()=>{ const t=st.ptab||lsGet("slc_ptab")||"summary"; return PTABS.some(x=>x[0]===t)?t:"summary"; };
+function setPtab(t){ st.ptab=t; lsSet("slc_ptab",t); drawPanel(); const b=$("ptb_"+t); if(b) b.focus(); }
+function lastSale(p){ const r=((p.report||{}).ppd||{}).here||[]; if(r[0]) return {d:r[0].d,p:r[0].p};
+  const z=((p.zhist||{}).sales||[]).slice().sort((a,b)=>a.date<b.date?1:-1)[0]; return z?{d:z.date,p:z.price,z:true}:null; }
+function checkRows(p){
+  return [["zhist","Zoopla history for the address",p.zhist&&p.zhist.checkedOn,"listings"],["planning","Planning and constraints",p.planning&&p.planning.at,"planning"],
+    ["crime","Recorded crime (police.uk)",p.crime&&p.crime.at,"area"],["report","Sales, prices, transport and schools",p.report&&p.report.at,"report"]];
+}
+function pointsToCheck(p){
+  const out=[], seen={}, add=t=>{ const k=String(t||"").slice(0,80); if(t&&!seen[k]){ seen[k]=1; out.push(t); } };
+  (p.checks||[]).forEach(add);
+  compare(p).filter(f=>!f.same).forEach(f=>add(f.text));
+  if(p.planning) planFlags(p,p.planning).forEach(add);
+  sizeOf(p).notes.forEach(add);
+  if(p.crime){ const n=crimeNote(p,p.crime); if(n) add(n); }
+  return out;
+}
+function summaryHtml(p,c,canEdit){
+  const ls=p.listings||[], s=sizeOf(p), sale=lastSale(p), cf=crimeFacts(p.crime), pl=p.planning, r=c?rating(c):null;
+  const dom=ls.map(l=>{ const f=facts(l); return f&&f.dom!=null?{d:f.dom,k:f.startKnown}:null; }).filter(Boolean).sort((a,b)=>b.d-a.d)[0];
+  const band=ls.map(l=>l.ctax).filter(Boolean)[0];
+  const rows=[["Asking price",ls.map(l=>PORTALS[l.portal].name+" "+money(l.price)).join(" · ")],["On the market",dom?(dom.k?"":"at least ")+dom.d+" days":""],
+    ["Size",s.sqft?nf.format(s.sqft)+" sq ft"+(s.psf?" · £"+nf.format(s.psf)+" per sq ft":""):"Not in the advert"],["Council tax",band?"Band "+band:""],["Tenure",p.tenure||""],
+    ["Last sold",sale?money(sale.p)+", "+fmtMY(sale.d)+(sale.z?" (Zoopla)":""):""],
+    ["Area rating",r?r.score.toFixed(1)+" / 10, "+r.band:""],
+    ["Crime",cf?nf.format(cf.T)+" recorded within a mile in 12 months; "+cf.g[0].pc+"% shop and other theft":(p.crystal&&typeof p.crystal.crime==="number"?"Crystal Roof "+p.crystal.crime+"/10 for "+(p.crystal.pc||"the postcode"):"")],
+    ["Planning",pl?planLevel(pl)[0]+": "+planLevel(pl)[1]+" live applications within 250 m":""]].filter(x=>x[1]);
+  let h='<dl class="kv sumkv">'+rows.map(x=>'<dt>'+esc(x[0])+'</dt><dd>'+esc(x[1])+'</dd>').join("")+'</dl>';
+  const pts=pointsToCheck(p);
+  if(pts.length) h+='<div class="section"><span class="label">Points to check ('+pts.length+')</span><ul class="checks">'+pts.slice(0,4).map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul>'+
+    (pts.length>4?'<details><summary class="small">Show '+(pts.length-4)+' more</summary><ul class="checks">'+pts.slice(4).map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul></details>':'')+'</div>';
+  h+='<div class="section"><span class="label">Checks</span><ul class="cklist">'+checkRows(p).map(([k,label,at,tab])=>'<li><span class="ckdot '+(at?"ok":"")+'" aria-hidden="true"></span><span class="cklabel">'+esc(label)+'<br><span class="small muted">'+(at?"Read "+esc(fmtD(at)):"Not run yet")+'</span></span>'+
+      (tab==="report"?(STANDALONE?'<button type="button" class="btn quiet" data-open="report">Open report</button>':''):'<button type="button" class="btn quiet" data-tab="'+tab+'">View</button>')+'</li>').join("")+'</ul>'+
+    (canEdit&&STANDALONE?'<div class="actions"><button type="button" class="btn" id="runAll">Run all checks</button><span class="small muted" id="runMsg" role="status"></span></div><p class="small muted">Runs each check above in turn and saves the results. Months of police data and earlier readings are kept, so repeat runs give the same figures.</p>':'')+'</div>';
+  if(p.note) h+='<p class="small muted">'+esc(p.note)+'</p>';
+  return h;
+}
+async function runAllChecks(p){
+  const say=t=>{ const m=$("runMsg"); if(m) m.textContent=t; }, b=$("runAll"); if(b) b.disabled=true;
+  const patch={}, done=[], failed=[];
+  if(!p.zhist&&normPc(refOf(p).pc)){ say("Looking up the address on Zoopla…"); try{ const f=await findAddress(refOf(p)); if(f.pick){ const z=await readZProperty(f.pick.uprn,false); z.how=f.how; if(f.pick.dist!=null) z.dist=f.pick.dist; patch.zhist=z; done.push("address history"); } else failed.push("address history (choose the address in Listings)"); }catch(e){ failed.push("address history"); } }
+  say("Reading planning applications and constraints…"); try{ patch.planning=await planningRead(p); done.push("planning"); }catch(e){ failed.push("planning"); }
+  try{ patch.crime=await crimeRead(p,p.crime,say); done.push("crime"); }catch(e){ failed.push("crime"); }
+  say("Reading sales, the price index, transport and schools…"); const out={at:isoToday(),errors:[]};
+  await Promise.all([ppdRead(p).then(v=>{ out.ppd=v; },()=>out.errors.push("sales history")),hpiRead(p).then(v=>{ out.hpi=v; },()=>out.errors.push("price index"))]);
+  try{ out.osm=await osmRead(p); }catch(e){ out.errors.push("transport and schools"); }
+  if(out.ppd||out.hpi||out.osm){ patch.report=out; done.push("report data"+(out.errors.length?" (missing "+out.errors.join(", ")+")":"")); } else failed.push("report data");
+  st.flash={id:p.id,text:"Checks finished: "+(done.length?done.join(", "):"none")+"."+(failed.length?" Not done: "+failed.join(", ")+".":"")};
+  if(Object.keys(patch).length) await st.store.update(p.id,patch); else { if(b) b.disabled=false; say(st.flash.text); }
+}
+function wireTabs(p){
+  const tl=$("ptabs"); if(tl){ const bs=[...tl.querySelectorAll("button[role=tab]")];
+    bs.forEach((b,i)=>{ b.addEventListener("click",()=>setPtab(b.dataset.t)); b.addEventListener("keydown",e=>{ if(e.key==="ArrowRight"||e.key==="ArrowLeft"){ e.preventDefault(); const n=bs[(i+(e.key==="ArrowRight"?1:bs.length-1))%bs.length]; setPtab(n.dataset.t); } }); }); }
+  document.querySelectorAll("#panel [data-tab]").forEach(b=>b.addEventListener("click",()=>setPtab(b.dataset.tab)));
+  document.querySelectorAll("#panel [data-open=report]").forEach(b=>b.addEventListener("click",()=>openReport(p.id)));
+  if($("runAll")) $("runAll").addEventListener("click",()=>runAllChecks(p));
+}
+function listingsHtml(p,canEdit){
+  const ls=p.listings||[]; let h='<div class="portals">';
+  ["rightmove","zoopla"].forEach(k=>{
+    const mine=ls.map((l,i)=>({l,i})).filter(x=>x.l.portal===k);
+    if(!mine.length){ const s=safeUrl(k,(p.search||{})[k]);
+      h+='<div class="pcard '+k+'"><span class="pname">'+PORTALS[k].name+'</span><p class="small muted">No matching listing on file.</p>'+(s?'<a class="golink ghost" href="'+esc(s)+'" target="_blank" rel="noopener noreferrer">Search '+PORTALS[k].name+' for this street ↗</a>':'')+
+        (canEdit&&k==="zoopla"&&STANDALONE&&ls.some(l=>l.portal==="rightmove")?'<div><button type="button" class="btn quiet" id="zfBtn">Find it on Zoopla</button></div><div id="zf_det"></div>':'')+
+        (canEdit?'<div class="field"><label class="label" for="al_'+k+'">Add its '+PORTALS[k].name+' link</label><input id="al_'+k+'" type="url" placeholder="'+PORTALS[k].host+'…"></div>'+readerHtml("al_"+k,"Read and add"):'')+'</div>'; return; }
+    mine.forEach(({l,i})=>{ const f=facts(l);
+      h+='<div class="pcard '+k+'"><span class="pname">'+PORTALS[k].name+(l.match&&l.match!=="confirmed"?' <span class="chip flag">'+esc(l.match)+' match</span>':'')+'</span>'+
+        '<span class="price">'+esc(money(l.price))+'</span><span class="small muted">'+esc(l.qualifier||"Asking price")+'</span>'+
+        '<dl class="kv"><dt>Agent</dt><dd>'+esc(l.agent||"Not recorded")+'</dd>'+
+        '<dt>'+(f.startKnown?"Listed":"First seen")+'</dt><dd>'+(f.firstKnown?esc(fmtD(f.firstKnown.date))+(f.startKnown?"":" (earlier start not shown)"):"No dates")+'</dd>'+
+        '<dt>Last change</dt><dd>'+(f.last&&f.ev.length>1||f.last&&!f.startKnown?esc(EVENTS[f.last.type]||f.last.type)+" "+esc(fmtD(f.last.date)):"None since listing")+'</dd>'+
+        '<dt>On market</dt><dd class="num">'+(f.dom==null?"Unknown":(f.startKnown?"":"at least ")+f.dom+" days")+'</dd>'+
+        (l.ctax?'<dt>Council tax</dt><dd>Band '+esc(l.ctax)+'</dd>':'')+(l.pc?'<dt>Postcode</dt><dd>'+esc(l.pc)+'</dd>':'')+(l.uprn?'<dt>UPRN</dt><dd class="num">'+esc(l.uprn)+'</dd>':'')+
+        '<dt>Listing ID</dt><dd class="num">'+esc(l.id||"")+'</dd></dl>'+linkBtn(l)+
+        (Array.isArray(l.alt)?l.alt.map(a=>{const u=safeUrl(k,a.url);return u?'<a class="golink ghost" href="'+esc(u)+'" target="_blank" rel="noopener noreferrer">'+esc(a.label||"Other candidate")+' ↗</a>':"";}).join(""):"")+
+        (canEdit&&safeUrl(k,l.url)?readerHtml("re_"+i,"Re-read this listing"):'')+'</div>'; });
+  });
+  h+='</div>';
+  const cmp=compare(p);
+  if(cmp.length) h+='<div class="section"><span class="label">Where the portals differ</span><ul class="diffs">'+cmp.map(f=>'<li class="'+(f.same?"same":"")+'">'+esc(f.text)+'</li>').join("")+'</ul></div>';
+  h+='<div class="section"><span class="label">Listing history</span><div class="tl" id="tl"></div>'+historyTable(p)+'</div>';
+  h+=zhistBlock(p,canEdit);
+  if(canEdit) h+=eventForm(p);
+  return h;
+}
+function detail(p){
+  const c=lsoaOf(p), ls=p.listings||[], canEdit=st.canWrite!==false&&!!st.store, T=ptabNow(), show=k=>T==="all"||T===k;
+  let h='<div class="panel-head"><button type="button" class="btn quiet" id="backBtn">← All properties</button><span class="small muted">'+(p.checkedOn?"Checked "+esc(fmtD(p.checkedOn)):"")+'</span></div>';
+  if(st.flash&&st.flash.id===p.id) h+='<p class="flash" role="status">'+esc(st.flash.text)+'</p>';
+  h+='<div class="dhead"><h2>'+esc(p.name||"Property")+'</h2><p class="muted">'+esc([p.locality,p.postcode].filter(Boolean).join(" · "))+'</p><p class="small">'+esc([p.beds?p.beds+" bed":"",p.type,sizeShort(p),p.tenure,p.newBuild?"New build":""].filter(Boolean).join(" · "))+'</p>'+
+    '<div class="dprices">'+ls.map(l=>'<span><span class="dot '+l.portal+'"></span>'+esc(money(l.price))+'</span>').join("")+'</div></div>';
+  h+='<div class="actions dacts">'+(STANDALONE?'<button type="button" class="btn" id="rptBtn">Open property report</button>':'')+
+    (canEdit?'<button type="button" class="btn quiet" id="moveBtn" aria-pressed="'+(st.moving===p.id)+'">'+(st.moving===p.id?"Stop moving the pin":"Move the pin")+'</button>':'')+'</div>'+
+    (canEdit?'<p class="small muted pinnote">'+(st.moving===p.id?"Drag this property's price tag to its new position.":esc("Pin "+(p.pinNote||"at the postcode centre")))+'</p>':'');
+  h+='<div class="ptabs" id="ptabs" role="tablist" aria-label="Property sections">'+PTABS.map(([k,n])=>'<button type="button" role="tab" id="ptb_'+k+'" data-t="'+k+'" aria-selected="'+(k===T)+'" aria-controls="pt_'+k+'" tabindex="'+(k===T?0:-1)+'">'+n+'</button>').join("")+'</div>';
+  const pane=(k,html)=>'<div class="ptpanel" role="tabpanel" id="pt_'+k+'" aria-labelledby="ptb_'+k+'"'+(show(k)?'':' hidden')+'>'+(T==="all"&&k!=="summary"?'<h3 class="pthead">'+PTABS.find(x=>x[0]===k)[1]+'</h3>':'')+html+'</div>';
+  h+=pane("summary",summaryHtml(p,c,canEdit));
+  h+=pane("listings",listingsHtml(p,canEdit));
+  h+=pane("value",sizeBlock(p,canEdit));
+  h+=pane("area",(c?ratingBlock(c,p):'<p class="small muted">The pin is outside the areas on the map, so there is no area rating.</p>')+crimeBlock(p,canEdit));
+  h+=pane("planning",planningBlock(p,canEdit));
+  return h;
+}
+/* the list tools live in a dialog so the property list stays short */
+function listDlg(){ let d=$("listDlg"); if(d) return d;
+  d=document.createElement("dialog"); d.id="listDlg"; d.className="dlg"; d.setAttribute("aria-labelledby","listDlgH");
+  d.innerHTML='<div class="dlg-head"><h2 id="listDlgH">Manage your list</h2><button type="button" class="btn quiet" id="listDlgX">Close</button></div><div class="dlg-body" id="listDlgBody"></div>';
+  document.body.appendChild(d); $("listDlgX").addEventListener("click",()=>d.close()); return d; }
+function renderListDlg(){ const d=listDlg(); $("listDlgBody").innerHTML='<p class="small muted">Back up or move your list, add many properties at once from the Excel template, or save a copy of this page with your list inside it to share.</p>'+fileBar(); wireFiles(); }
 /* ---------- files: export, import, a copy to share, the Excel template, batch import ---------- */
 function download(name,data,type){ const u=URL.createObjectURL(new Blob([data],{type})); const el=document.createElement("a"); el.href=u; el.download=name; document.body.appendChild(el); el.click(); el.remove(); setTimeout(()=>URL.revokeObjectURL(u),5000); }
 const embedJson=o=>JSON.stringify(o).replace(/</g,"\\u003c").replace(/\u2028|\u2029/g,"");
@@ -2392,9 +2538,10 @@ function drawPanel(){
   const el=$("panel");
   if(st.mode==="add"){ el.innerHTML=addForm(); wireAdd(); return; }
   const p=st.props.find(x=>x.id===st.sel);
-  if(p){ el.innerHTML=detail(p); wireDetail(p); wirePlanning(p); wireCrime(p); drawTimeline(p); drawPlanMarkers(p); return; }
+  if(p){ el.innerHTML=detail(p); wireDetail(p); wirePlanning(p); wireCrime(p); wireTabs(p); if($("tl")) drawTimeline(p); drawPlanMarkers(p); return; }
   drawPlanMarkers(null);
-  let h=pcBlock()+'<div class="panel-head"><h2>Properties</h2><span class="small muted">'+(st.dbState==="ready"?st.props.length+" on file":"")+'</span></div>';
+  let h=pcBlock()+'<div class="panel-head"><h2>Properties</h2><span class="small muted">'+(st.dbState==="ready"?st.props.length+" on file":"")+'</span>'+(STANDALONE&&st.store&&st.dbState==="ready"?'<button type="button" class="btn quiet" id="listBtn">Manage list…</button>':'')+'</div>';
+  if(st.batch) h+='<p class="small batchline" role="status">'+(st.batch.running?"Importing "+Math.min(st.batch.done+1,st.batch.total)+" of "+st.batch.total+"…":"Import finished: "+st.batch.log.filter(x=>x.ok).length+" of "+st.batch.total+" read.")+' <button type="button" class="linkbtn" id="batchView">Details</button></p>';
   if(st.dbState==="loading") h+='<p class="empty">Loading the listing file. Each property will appear here and as a price tag on the map.</p>';
   else if(st.dbState==="absent") h+='<p class="empty">The listing file is kept by Claude alongside this page, so it only loads when the page is opened in Claude. A downloaded copy of the page cannot reach it; use the standalone file for that. The deprivation map works either way.</p>';
   else if(st.dbState==="error") h+='<p class="empty">The listing file could not be read just now. Reload the page to try again.</p>';
@@ -2405,51 +2552,12 @@ function drawPanel(){
         (p.listings||[]).map(l=>'<span class="dot '+l.portal+'"></span>'+esc(money(l.price))).join("<br>")+'</span><span class="meta">'+
         (c?'<span class="chip">Area '+rating(c).score.toFixed(1)+'/10 '+dchip(DATA.lsoa[c].d[0])+'</span>':'')+flagsHtml(p,3)+'</span></button></li>'; });
     h+='</ul><p class="small muted">Choose a property to compare its two listings and their history.</p>'; }
-  h+=fileBar();
-  el.innerHTML=h; wireFiles();
+  el.innerHTML=h; renderListDlg();
+  if($("listBtn")) $("listBtn").addEventListener("click",()=>{ const d=listDlg(); if(!d.open) d.showModal(); });
+  if($("batchView")) $("batchView").addEventListener("click",()=>{ const d=listDlg(); if(!d.open) d.showModal(); });
   if($("pcArea")) $("pcArea").addEventListener("click",()=>addArea($("pcArea").dataset.lad));
   if($("pcClear")) $("pcClear").addEventListener("click",()=>{ st.pc=null; if(pcMarker){ pcMarker.remove(); pcMarker=null; } drawPanel(); });
   el.querySelectorAll(".pitem").forEach(b=>b.addEventListener("click",()=>select(b.dataset.id,false)));
-}
-function detail(p){
-  const c=lsoaOf(p), ls=p.listings||[], canEdit=st.canWrite!==false&&!!st.store;
-  let h='<div class="panel-head"><button type="button" class="btn quiet" id="backBtn">← All properties</button><span class="small muted">'+(p.checkedOn?"Checked "+esc(fmtD(p.checkedOn)):"")+'</span></div>';
-  if(st.flash&&st.flash.id===p.id) h+='<p class="flash" role="status">'+esc(st.flash.text)+'</p>';
-  h+='<div><h2>'+esc(p.name||"Property")+'</h2><p class="muted">'+esc([p.locality,p.postcode].filter(Boolean).join(" · "))+'</p><p class="small">'+esc([p.beds?p.beds+" bed":"",p.type,sizeShort(p),p.tenure,p.newBuild?"New build":""].filter(Boolean).join(" · "))+'</p></div>';
-  if(STANDALONE) h+='<div class="actions"><button type="button" class="btn" id="rptBtn">Open property report</button></div>';
-  if(canEdit) h+='<div class="actions"><button type="button" class="btn quiet" id="moveBtn" aria-pressed="'+(st.moving===p.id)+'">'+(st.moving===p.id?"Stop moving the pin":"Move the pin")+'</button><span class="small muted">'+(st.moving===p.id?"Drag this property's price tag to its new position.":esc("Pin "+(p.pinNote||"at the postcode centre")))+'</span></div>';
-  h+='<div class="portals">';
-  ["rightmove","zoopla"].forEach(k=>{
-    const mine=ls.map((l,i)=>({l,i})).filter(x=>x.l.portal===k);
-    if(!mine.length){ const s=safeUrl(k,(p.search||{})[k]);
-      h+='<div class="pcard '+k+'"><span class="pname">'+PORTALS[k].name+'</span><p class="small muted">No matching listing on file.</p>'+(s?'<a class="golink ghost" href="'+esc(s)+'" target="_blank" rel="noopener noreferrer">Search '+PORTALS[k].name+' for this street ↗</a>':'')+
-        (canEdit&&k==="zoopla"&&STANDALONE&&ls.some(l=>l.portal==="rightmove")?'<div><button type="button" class="btn quiet" id="zfBtn">Find it on Zoopla</button></div><div id="zf_det"></div>':'')+
-        (canEdit?'<div class="field"><label class="label" for="al_'+k+'">Add its '+PORTALS[k].name+' link</label><input id="al_'+k+'" type="url" placeholder="'+PORTALS[k].host+'…"></div>'+readerHtml("al_"+k,"Read and add"):'')+'</div>'; return; }
-    mine.forEach(({l,i})=>{ const f=facts(l);
-      h+='<div class="pcard '+k+'"><span class="pname">'+PORTALS[k].name+(l.match&&l.match!=="confirmed"?' <span class="chip flag">'+esc(l.match)+' match</span>':'')+'</span>'+
-        '<span class="price">'+esc(money(l.price))+'</span><span class="small muted">'+esc(l.qualifier||"Asking price")+'</span>'+
-        '<dl class="kv"><dt>Agent</dt><dd>'+esc(l.agent||"Not recorded")+'</dd>'+
-        '<dt>'+(f.startKnown?"Listed":"First seen")+'</dt><dd>'+(f.firstKnown?esc(fmtD(f.firstKnown.date))+(f.startKnown?"":" (earlier start not shown)"):"No dates")+'</dd>'+
-        '<dt>Last change</dt><dd>'+(f.last&&f.ev.length>1||f.last&&!f.startKnown?esc(EVENTS[f.last.type]||f.last.type)+" "+esc(fmtD(f.last.date)):"None since listing")+'</dd>'+
-        '<dt>On market</dt><dd class="num">'+(f.dom==null?"Unknown":(f.startKnown?"":"at least ")+f.dom+" days")+'</dd>'+
-        (l.ctax?'<dt>Council tax</dt><dd>Band '+esc(l.ctax)+'</dd>':'')+(l.pc?'<dt>Postcode</dt><dd>'+esc(l.pc)+'</dd>':'')+(l.uprn?'<dt>UPRN</dt><dd class="num">'+esc(l.uprn)+'</dd>':'')+
-        '<dt>Listing ID</dt><dd class="num">'+esc(l.id||"")+'</dd></dl>'+linkBtn(l)+
-        (Array.isArray(l.alt)?l.alt.map(a=>{const u=safeUrl(k,a.url);return u?'<a class="golink ghost" href="'+esc(u)+'" target="_blank" rel="noopener noreferrer">'+esc(a.label||"Other candidate")+' ↗</a>':"";}).join(""):"")+
-        (canEdit&&safeUrl(k,l.url)?readerHtml("re_"+i,"Re-read this listing"):'')+'</div>'; });
-  });
-  h+='</div>';
-  const cmp=compare(p);
-  if(cmp.length) h+='<div class="section"><span class="label">Where the portals differ</span><ul class="diffs">'+cmp.map(f=>'<li class="'+(f.same?"same":"")+'">'+esc(f.text)+'</li>').join("")+'</ul></div>';
-  h+='<div class="section"><span class="label">Listing history</span><div class="tl" id="tl"></div>'+historyTable(p)+'</div>';
-  h+=zhistBlock(p,canEdit);
-  h+=sizeBlock(p,canEdit);
-  h+=planningBlock(p,canEdit);
-  h+=crimeBlock(p,canEdit);
-  if(c) h+=ratingBlock(c,p);
-  if(Array.isArray(p.checks)&&p.checks.length) h+='<div class="section"><span class="label">Points to check</span><ul class="checks">'+p.checks.map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul></div>';
-  if(p.note) h+='<p class="small muted">'+esc(p.note)+'</p>';
-  if(canEdit) h+=eventForm(p);
-  return h;
 }
 function historyTable(p){
   const rows=[]; (p.listings||[]).forEach(l=>facts(l).ev.forEach(e=>rows.push({l,e})));
@@ -2677,6 +2785,7 @@ function select(id,fromMap){
   const p=st.props.find(x=>x.id===id);
   if(p){ const c=lsoaOf(p); if(c) st.area=c; }
   drawPins(); drawPanel(); drawArea();
+  if(p&&fromMap&&window.innerWidth<900){ const pn=$("panel"); if(pn) pn.scrollIntoView({behavior:"smooth",block:"start"}); }   // on a phone the panel sits under the map
   if(p&&map&&pinById[id]){ if(!fromMap) map.flyTo([p.lat,p.lng],Math.max(map.getZoom(),13.5),{duration:.5}); pinById[id].openPopup(); }
 }
 function drawAll(){ drawHeader(); restyle(); drawArea(); drawPins(); drawPanel(); drawSchedule(); $("addBtn").hidden=!(st.store&&st.dbState==="ready"&&st.canWrite!==false); }
